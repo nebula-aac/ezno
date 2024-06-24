@@ -1,5 +1,6 @@
 use std::ops::Neg;
 
+use crate::ast::VariableOrPropertyAccess;
 use crate::{
 	derive_ASTNode, parse_bracketed, throw_unexpected_token_with_token, to_string_bracketed,
 	ListItem, ParseErrors, Quoted,
@@ -24,13 +25,15 @@ use crate::{
 
 /// A reference to a type
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEqExtras, Eq, get_field_by_type::GetFieldByType)]
+#[derive(Debug, Clone, PartialEqExtras, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 #[partial_eq_ignore_types(Span)]
 pub enum TypeAnnotation {
 	/// A name e.g. `IPost`
 	Name(String, Span),
 	CommonName(CommonTypes, Span),
+	/// WIP
+	This(Span),
 	/// A name e.g. `Intl.IPost`. TODO can there be more than 2 members
 	NamespacedName(String, String, Span),
 	/// A name with generics e.g. `Array<number>`
@@ -65,7 +68,7 @@ pub enum TypeAnnotation {
 	/// Object literal e.g. `{ y: string }`
 	ObjectLiteral(Vec<WithComment<Decorated<InterfaceMember>>>, Span),
 	/// Tuple literal e.g. `[number, x: string]`
-	TupleLiteral(Vec<(TupleElementKind, AnnotationWithBinder)>, Span),
+	TupleLiteral(Vec<TupleLiteralElement>, Span),
 	/// ?
 	TemplateLiteral(Vec<TemplateLiteralPart<AnnotationWithBinder>>, Span),
 	/// Declares type as not assignable (still has interior mutability) e.g. `readonly number`
@@ -74,12 +77,28 @@ pub enum TypeAnnotation {
 	Index(Box<TypeAnnotation>, Box<TypeAnnotation>, Span),
 	/// KeyOf
 	KeyOf(Box<TypeAnnotation>, Span),
-	/// For operation precedence reasons
-	ParenthesizedReference(Box<TypeAnnotation>, Span),
+	TypeOf(Box<VariableOrPropertyAccess>, Span),
+	Infer {
+		name: String,
+		extends: Option<Box<TypeAnnotation>>,
+		position: Span,
+	},
+	/// This is technically a special return type in TypeScript but we can make a superset behavior here
+	Asserts(Box<TypeAnnotation>, Span),
+	Extends {
+		item: Box<TypeAnnotation>,
+		extends: Box<TypeAnnotation>,
+		position: Span,
+	},
+	Is {
+		item: Box<TypeAnnotation>,
+		is: Box<TypeAnnotation>,
+		position: Span,
+	},
 	Conditional {
-		condition: TypeCondition,
-		resolve_true: TypeConditionResult,
-		resolve_false: TypeConditionResult,
+		condition: Box<TypeAnnotation>,
+		resolve_true: Box<TypeAnnotation>,
+		resolve_false: Box<TypeAnnotation>,
 		position: Span,
 	},
 	Symbol {
@@ -89,6 +108,8 @@ pub enum TypeAnnotation {
 		name: Option<String>,
 		position: Span,
 	},
+	/// For operation precedence reasons
+	ParenthesizedReference(Box<TypeAnnotation>, Span),
 	Decorated(
 		Decorator,
 		#[cfg_attr(target_family = "wasm", tsify(type = "TypeAnnotation"))] Box<Self>,
@@ -98,9 +119,11 @@ pub enum TypeAnnotation {
 	Marker(Marker<TypeAnnotation>, Span),
 }
 
-impl ListItem for TypeAnnotation {}
+impl ListItem for TypeAnnotation {
+	type LAST = ();
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[apply(derive_ASTNode)]
 pub enum AnnotationWithBinder {
 	Annotated { name: String, ty: TypeAnnotation, position: Span },
@@ -164,14 +187,6 @@ pub enum TupleElementKind {
 	Optional,
 }
 
-/// Condition in a [`TypeAnnotation::Conditional`]
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[apply(derive_ASTNode)]
-pub enum TypeCondition {
-	Extends { ty: Box<TypeAnnotation>, extends: Box<TypeAnnotation>, position: Span },
-	Is { ty: Box<TypeAnnotation>, is: Box<TypeAnnotation>, position: Span },
-}
-
 /// Reduces string allocation and type lookup overhead
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[apply(derive_ASTNode)]
@@ -179,88 +194,6 @@ pub enum CommonTypes {
 	String,
 	Number,
 	Boolean,
-}
-
-impl TypeCondition {
-	pub(crate) fn to_string_from_buffer<T: source_map::ToString>(
-		&self,
-		buf: &mut T,
-		options: &crate::ToStringOptions,
-		local: crate::LocalToStringInformation,
-	) {
-		match self {
-			TypeCondition::Extends { ty, extends, .. } => {
-				ty.to_string_from_buffer(buf, options, local);
-				buf.push_str(" extends ");
-				extends.to_string_from_buffer(buf, options, local);
-			}
-			TypeCondition::Is { ty, is, .. } => {
-				ty.to_string_from_buffer(buf, options, local);
-				buf.push_str(" is ");
-				is.to_string_from_buffer(buf, options, local);
-			}
-		}
-	}
-
-	pub(crate) fn get_position(&self) -> Span {
-		match self {
-			TypeCondition::Extends { position, .. } | TypeCondition::Is { position, .. } => {
-				*position
-			}
-		}
-	}
-}
-
-/// The result of a [`TypeAnnotation::Condition`]
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[apply(derive_ASTNode)]
-pub enum TypeConditionResult {
-	/// TODO e.g. `infer number`
-	Infer(Box<TypeAnnotation>, Span),
-	Reference(Box<TypeAnnotation>),
-}
-
-impl ASTNode for TypeConditionResult {
-	fn get_position(&self) -> Span {
-		match self {
-			TypeConditionResult::Infer(_, pos) => *pos,
-			TypeConditionResult::Reference(reference) => reference.get_position(),
-		}
-	}
-
-	fn from_reader(
-		reader: &mut impl TokenReader<TSXToken, crate::TokenStart>,
-		state: &mut crate::ParsingState,
-		options: &ParseOptions,
-	) -> ParseResult<Self> {
-		if let Some(Token(_, start)) =
-			reader.conditional_next(|token| matches!(token, TSXToken::Keyword(TSXKeyword::Infer)))
-		{
-			let inferred_type = TypeAnnotation::from_reader(reader, state, options)?;
-			let position = start.union(inferred_type.get_position());
-			Ok(Self::Infer(Box::new(inferred_type), position))
-		} else {
-			TypeAnnotation::from_reader(reader, state, options)
-				.map(|ty_ref| Self::Reference(Box::new(ty_ref)))
-		}
-	}
-
-	fn to_string_from_buffer<T: source_map::ToString>(
-		&self,
-		buf: &mut T,
-		options: &crate::ToStringOptions,
-		local: crate::LocalToStringInformation,
-	) {
-		match self {
-			TypeConditionResult::Infer(inferred_type, _) => {
-				buf.push_str("infer ");
-				inferred_type.to_string_from_buffer(buf, options, local);
-			}
-			TypeConditionResult::Reference(reference) => {
-				reference.to_string_from_buffer(buf, options, local);
-			}
-		}
-	}
 }
 
 impl ASTNode for TypeAnnotation {
@@ -305,9 +238,9 @@ impl ASTNode for TypeAnnotation {
 				buf.push_str(" => ");
 				return_type.to_string_from_buffer(buf, options, local);
 			}
-			Self::BooleanLiteral(expression, _) => {
-				buf.push_str(if *expression { "true" } else { "false" });
-			}
+			Self::BooleanLiteral(true, _) => buf.push_str("true"),
+			Self::BooleanLiteral(false, _) => buf.push_str("false"),
+			Self::This(..) => buf.push_str("this"),
 			Self::NumberLiteral(value, _) => {
 				buf.push_str(&value.to_string());
 			}
@@ -332,29 +265,28 @@ impl ASTNode for TypeAnnotation {
 					}
 				}
 			}
-			Self::NamespacedName(..) => todo!(),
-			Self::ObjectLiteral(members, _) => {
-				buf.push('{');
-				for (at_end, member) in members.iter().endiate() {
-					member.to_string_from_buffer(buf, options, local);
-					if !at_end {
-						buf.push_str(", ");
-					}
+			Self::TypeOf(on, _pos) => {
+				buf.push_str("typeof ");
+				on.to_string_from_buffer(buf, options, local);
+			}
+			Self::Infer { name, extends, position: _ } => {
+				buf.push_str("infer ");
+				buf.push_str(name.as_str());
+				if let Some(ref extends) = extends {
+					buf.push_str(" extends ");
+					extends.to_string_from_buffer(buf, options, local);
 				}
-				buf.push('}');
+			}
+			Self::NamespacedName(from, to, _) => {
+				buf.push_str(from);
+				buf.push('.');
+				buf.push_str(to);
+			}
+			Self::ObjectLiteral(members, _) => {
+				to_string_bracketed(members, ('{', '}'), buf, options, local);
 			}
 			Self::TupleLiteral(members, _) => {
-				buf.push('[');
-				for (at_end, (spread, member)) in members.iter().endiate() {
-					if matches!(spread, TupleElementKind::Spread) {
-						buf.push_str("...");
-					}
-					member.to_string_from_buffer(buf, options, local);
-					if !at_end {
-						buf.push_str(", ");
-					}
-				}
-				buf.push(']');
+				to_string_bracketed(members, ('[', ']'), buf, options, local);
 			}
 			Self::Index(on, with, _) => {
 				on.to_string_from_buffer(buf, options, local);
@@ -367,10 +299,33 @@ impl ASTNode for TypeAnnotation {
 				item.to_string_from_buffer(buf, options, local);
 			}
 			Self::Conditional { condition, resolve_true, resolve_false, .. } => {
+				// Same as expression::condition
+				let split_lines = crate::are_nodes_over_length(
+					[condition, resolve_true, resolve_false].iter().map(AsRef::as_ref),
+					options,
+					local,
+					Some(
+						u32::from(options.max_line_length)
+							.saturating_sub(buf.characters_on_current_line()),
+					),
+					true,
+				);
 				condition.to_string_from_buffer(buf, options, local);
-				buf.push_str(" ? ");
+				if split_lines {
+					buf.push_new_line();
+					options.add_indent(local.depth + 1, buf);
+					buf.push_str("? ");
+				} else {
+					buf.push_str(if options.pretty { " ? " } else { "?" });
+				}
 				resolve_true.to_string_from_buffer(buf, options, local);
-				buf.push_str(" : ");
+				if split_lines {
+					buf.push_new_line();
+					options.add_indent(local.depth + 1, buf);
+					buf.push_str(": ");
+				} else {
+					buf.push_str(if options.pretty { " : " } else { ":" });
+				}
 				resolve_false.to_string_from_buffer(buf, options, local);
 			}
 			Self::ArrayLiteral(item, _) => {
@@ -409,7 +364,26 @@ impl ASTNode for TypeAnnotation {
 				}
 				buf.push('`');
 			}
-			Self::Symbol { .. } => buf.push_str("symbol"),
+			Self::Symbol { unique, .. } => {
+				if *unique {
+					buf.push_str("unique ");
+				}
+				buf.push_str("symbol");
+			}
+			Self::Extends { item, extends, .. } => {
+				item.to_string_from_buffer(buf, options, local);
+				buf.push_str(" extends ");
+				extends.to_string_from_buffer(buf, options, local);
+			}
+			Self::Is { item, is, .. } => {
+				item.to_string_from_buffer(buf, options, local);
+				buf.push_str(" is ");
+				is.to_string_from_buffer(buf, options, local);
+			}
+			Self::Asserts(predicate, _pos) => {
+				buf.push_str("asserts ");
+				predicate.to_string_from_buffer(buf, options, local);
+			}
 		}
 	}
 
@@ -483,6 +457,43 @@ impl TypeAnnotation {
 			t @ Token(TSXToken::Keyword(TSXKeyword::False), _) => {
 				Self::BooleanLiteral(false, t.get_span())
 			}
+			t @ Token(TSXToken::Keyword(TSXKeyword::This), _) => Self::This(t.get_span()),
+			Token(TSXToken::Keyword(TSXKeyword::Infer), start) => {
+				let token = reader.next().ok_or_else(parse_lexing_error)?;
+				let (name, position) = token_as_identifier(token, "infer name")?;
+				let (position, extends) = if reader
+					.conditional_next(|t| matches!(t, TSXToken::Keyword(TSXKeyword::Extends)))
+					.is_some()
+				{
+					let extends = TypeAnnotation::from_reader_with_config(
+						reader,
+						state,
+						options,
+						Some(TypeOperatorKind::Query),
+						None,
+					)?;
+					(start.union(extends.get_position()), Some(Box::new(extends)))
+				} else {
+					(start.union(position), None)
+				};
+				Self::Infer { name, extends, position }
+			}
+			Token(TSXToken::Keyword(TSXKeyword::Asserts), start) => {
+				let predicate = TypeAnnotation::from_reader_with_config(
+					reader,
+					state,
+					options,
+					parent_kind,
+					Some(start),
+				)?;
+				let position = start.union(predicate.get_position());
+				Self::Asserts(Box::new(predicate), position)
+			}
+			Token(TSXToken::Keyword(TSXKeyword::TypeOf), start) => {
+				let reference = VariableOrPropertyAccess::from_reader(reader, state, options)?;
+				let position = start.union(reference.get_position());
+				Self::TypeOf(Box::new(reference), position)
+			}
 			t @ Token(TSXToken::Keyword(TSXKeyword::Symbol), _) => {
 				let position = t.get_span();
 				#[cfg(feature = "extras")]
@@ -504,8 +515,8 @@ impl TypeAnnotation {
 				}
 			}
 			t @ Token(TSXToken::Keyword(TSXKeyword::Unique), _) => {
-				let sym_pos = reader.expect_next(TSXToken::Keyword(TSXKeyword::Symbol))?;
-				let position = t.get_span().union(sym_pos.with_length("symbol".len()));
+				let kw_pos = reader.expect_next(TSXToken::Keyword(TSXKeyword::Symbol))?;
+				let position = t.get_span().union(kw_pos.with_length("symbol".len()));
 				#[cfg(feature = "extras")]
 				let name =
 					reader.conditional_next(|t| matches!(t, TSXToken::StringLiteral(..))).map(
@@ -518,7 +529,7 @@ impl TypeAnnotation {
 						},
 					);
 				Self::Symbol {
-					unique: false,
+					unique: true,
 					position,
 					#[cfg(feature = "extras")]
 					name,
@@ -597,7 +608,7 @@ impl TypeAnnotation {
 				}
 			}
 			Token(TSXToken::OpenChevron, start) => {
-				let (type_parameters, _) =
+				let (type_parameters, _, _) =
 					parse_bracketed(reader, state, options, None, TSXToken::CloseChevron)?;
 				let parameters =
 					TypeAnnotationFunctionParameters::from_reader(reader, state, options)?;
@@ -617,40 +628,11 @@ impl TypeAnnotation {
 				Self::ObjectLiteral(members, position)
 			}
 			// Tuple literal type
-			Token(TSXToken::OpenBracket, start_pos) => {
-				let mut members = Vec::new();
-				loop {
-					if let Some(Token(TSXToken::CloseBrace, _)) = reader.peek() {
-						break;
-					}
-					let is_spread = reader
-						.conditional_next(|token| matches!(token, TSXToken::Spread))
-						.is_some();
-
-					let annotation_with_binder =
-						AnnotationWithBinder::from_reader(reader, state, options)?;
-
-					let kind = if is_spread {
-						TupleElementKind::Spread
-					} else if reader
-						.conditional_next(|token| matches!(token, TSXToken::QuestionMark))
-						.is_some()
-					{
-						TupleElementKind::Optional
-					} else {
-						TupleElementKind::Standard
-					};
-
-					members.push((kind, annotation_with_binder));
-
-					if let Some(Token(TSXToken::Comma, _)) = reader.peek() {
-						reader.next();
-					} else {
-						break;
-					}
-				}
-				let end = reader.expect_next_get_end(TSXToken::CloseBracket)?;
-				Self::TupleLiteral(members, start_pos.union(end))
+			Token(TSXToken::OpenBracket, start) => {
+				let (members, _, end) =
+					parse_bracketed(reader, state, options, None, TSXToken::CloseBracket)?;
+				let position = start.union(end);
+				Self::TupleLiteral(members, position)
 			}
 			Token(TSXToken::TemplateLiteralStart, start) => {
 				let mut parts = Vec::new();
@@ -693,7 +675,7 @@ impl TypeAnnotation {
 					.is_some()
 					.then(|| {
 						parse_bracketed(reader, state, options, None, TSXToken::CloseChevron)
-							.map(|(params, _items)| params)
+							.map(|(params, _, _)| params)
 					})
 					.transpose()?;
 				let parameters =
@@ -761,7 +743,6 @@ impl TypeAnnotation {
 			}
 		}
 
-		// Extends, Is, Intersections & Unions or implicit function literals
 		match reader.peek() {
 			Some(Token(TSXToken::Keyword(TSXKeyword::Extends), _)) => {
 				reader.next();
@@ -774,27 +755,11 @@ impl TypeAnnotation {
 				)?;
 				// TODO local
 				let position = reference.get_position().union(extends_type.get_position());
-				let condition = TypeCondition::Extends {
-					ty: Box::new(reference),
+				reference = TypeAnnotation::Extends {
+					item: Box::new(reference),
 					extends: Box::new(extends_type),
 					position,
 				};
-				reader.expect_next(TSXToken::QuestionMark)?;
-				// TODO may need to return here
-				// if return_on_union_or_intersection {
-				//     return Ok((reference, 0));
-				// }
-				let lhs = TypeConditionResult::from_reader(reader, state, options)?;
-				reader.expect_next(TSXToken::Colon)?;
-				let rhs = TypeConditionResult::from_reader(reader, state, options)?;
-				let position = condition.get_position().union(rhs.get_position());
-				// TODO zero here ..?
-				Ok(TypeAnnotation::Conditional {
-					condition,
-					resolve_true: lhs,
-					resolve_false: rhs,
-					position,
-				})
 			}
 			Some(Token(TSXToken::Keyword(TSXKeyword::Is), _)) => {
 				reader.next();
@@ -807,19 +772,18 @@ impl TypeAnnotation {
 				)?;
 				// TODO local
 				let position = reference.get_position().union(is_type.get_position());
-				let condition =
-					TypeCondition::Is { ty: Box::new(reference), is: Box::new(is_type), position };
-				reader.expect_next(TSXToken::QuestionMark)?;
-				// TODO may need to return here
-				// if return_on_union_or_intersection {
-				//     return Ok((reference, 0));
-				// }
-				let resolve_true = TypeConditionResult::from_reader(reader, state, options)?;
-				reader.expect_next(TSXToken::Colon)?;
-				let resolve_false = TypeConditionResult::from_reader(reader, state, options)?;
-				let position = condition.get_position().union(resolve_false.get_position());
-				Ok(TypeAnnotation::Conditional { condition, resolve_true, resolve_false, position })
+
+				reference = TypeAnnotation::Is {
+					item: Box::new(reference),
+					is: Box::new(is_type),
+					position,
+				};
 			}
+			_ => {}
+		}
+
+		// Extends, Is, Intersections & Unions or implicit function literals
+		match reader.peek() {
 			Some(Token(TSXToken::BitwiseOr, _)) => {
 				if matches!(parent_kind, Some(TypeOperatorKind::Query | TypeOperatorKind::Function))
 				{
@@ -904,6 +868,23 @@ impl TypeAnnotation {
 					return_type: Box::new(return_type),
 				})
 			}
+			Some(Token(TSXToken::QuestionMark, _)) => {
+				if let Some(TypeOperatorKind::Query) = parent_kind {
+					return Ok(reference);
+				}
+				reader.next();
+				let lhs = TypeAnnotation::from_reader(reader, state, options)?;
+				reader.expect_next(TSXToken::Colon)?;
+				let rhs = TypeAnnotation::from_reader(reader, state, options)?;
+				let position = reference.get_position().union(rhs.get_position());
+				// TODO zero here ..?
+				Ok(TypeAnnotation::Conditional {
+					condition: Box::new(reference),
+					resolve_true: Box::new(lhs),
+					resolve_false: Box::new(rhs),
+					position,
+				})
+			}
 			_ => Ok(reference),
 		}
 	}
@@ -959,7 +940,7 @@ pub(crate) fn generic_arguments_from_reader_sub_open_angle(
 }
 
 /// Mirrors [`crate::FunctionParameters`]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[apply(derive_ASTNode)]
 pub struct TypeAnnotationFunctionParameters {
 	pub parameters: Vec<TypeAnnotationFunctionParameter>,
@@ -1100,7 +1081,7 @@ impl TypeAnnotationFunctionParameters {
 	}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[apply(derive_ASTNode)]
 pub struct TypeAnnotationFunctionParameter {
 	pub decorators: Vec<Decorator>,
@@ -1111,13 +1092,69 @@ pub struct TypeAnnotationFunctionParameter {
 	pub position: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[apply(derive_ASTNode)]
 pub struct TypeAnnotationSpreadFunctionParameter {
 	pub decorators: Vec<Decorator>,
 	pub name: String,
 	pub type_annotation: TypeAnnotation,
 	pub position: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[apply(derive_ASTNode)]
+pub struct TupleLiteralElement(pub TupleElementKind, pub AnnotationWithBinder, pub Span);
+
+impl ASTNode for TupleLiteralElement {
+	fn get_position(&self) -> Span {
+		self.2
+	}
+
+	fn from_reader(
+		reader: &mut impl TokenReader<TSXToken, crate::TokenStart>,
+		state: &mut crate::ParsingState,
+		options: &crate::ParseOptions,
+	) -> ParseResult<Self> {
+		let is_spread = reader.conditional_next(|token| matches!(token, TSXToken::Spread));
+
+		let annotation_with_binder = AnnotationWithBinder::from_reader(reader, state, options)?;
+
+		let (kind, position) = if let Some(spread) = is_spread {
+			(TupleElementKind::Spread, spread.1.union(annotation_with_binder.get_position()))
+		} else if let Some(trailing_question) =
+			reader.conditional_next(|token| matches!(token, TSXToken::QuestionMark))
+		{
+			(
+				TupleElementKind::Optional,
+				annotation_with_binder.get_position().union(trailing_question.get_end()),
+			)
+		} else {
+			(TupleElementKind::Standard, annotation_with_binder.get_position())
+		};
+
+		Ok(Self(kind, annotation_with_binder, position))
+	}
+
+	fn to_string_from_buffer<T: source_map::ToString>(
+		&self,
+		buf: &mut T,
+		options: &crate::ToStringOptions,
+		local: crate::LocalToStringInformation,
+	) {
+		if let TupleElementKind::Spread = self.0 {
+			buf.push_str("...");
+		}
+		self.1.to_string_from_buffer(buf, options, local);
+		if let TupleElementKind::Optional = self.0 {
+			buf.push('?');
+		}
+	}
+}
+
+impl ListItem for TupleLiteralElement {
+	const EMPTY: Option<Self> = None;
+
+	type LAST = ();
 }
 
 #[cfg(test)]
@@ -1218,19 +1255,21 @@ mod tests {
 		assert_matches_ast!(
 			"[number, x: string]",
 			TypeAnnotation::TupleLiteral(
-				Deref @ [(
+				Deref @ [TupleLiteralElement(
 					TupleElementKind::Standard,
 					AnnotationWithBinder::NoAnnotation(TypeAnnotation::CommonName(
 						CommonTypes::Number,
 						span!(1, 7),
 					)),
-				), (
+					_,
+				), TupleLiteralElement(
 					TupleElementKind::Standard,
 					AnnotationWithBinder::Annotated {
 						name: Deref @ "x",
 						ty: TypeAnnotation::CommonName(CommonTypes::String, span!(12, 18)),
 						position: _,
 					},
+					_,
 				)],
 				span!(0, 19),
 			)

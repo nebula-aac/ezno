@@ -251,7 +251,8 @@ mod ast {
 		crate::functions::FunctionHeader,
 		crate::functions::MethodHeader,
 		crate::VariableKeyword,
-		crate::types::namespace::Namespace
+		crate::types::namespace::Namespace,
+		source_map::SourceId
 	];
 }
 
@@ -259,7 +260,7 @@ mod ast {
 mod structures {
 	use crate::{
 		property_key::{AlwaysPublic, PublicOrPrivate},
-		Statement, VariableIdentifier,
+		Statement, VariableField, VariableIdentifier,
 	};
 
 	use super::{
@@ -340,8 +341,8 @@ mod structures {
 		// TODO maybe WithComment on some of these
 		VariableFieldName(&'a str, &'a Span),
 		// TODO these should maybe only be the spread variables
-		ArrayDestructuringMember(&'a ArrayDestructuringField),
-		ObjectDestructuringMember(&'a WithComment<ObjectDestructuringField>),
+		ArrayDestructuringMember(&'a ArrayDestructuringField<VariableField>),
+		ObjectDestructuringMember(&'a WithComment<ObjectDestructuringField<VariableField>>),
 		ClassName(Option<&'a VariableIdentifier>),
 		FunctionName(Option<&'a VariableIdentifier>),
 		ClassPropertyKey(&'a PropertyKey<PublicOrPrivate>),
@@ -352,8 +353,8 @@ mod structures {
 	pub enum MutableVariableOrProperty<'a> {
 		VariableFieldName(&'a mut String),
 		// TODO these should maybe only be the spread variables
-		ArrayDestructuringMember(&'a mut ArrayDestructuringField),
-		ObjectDestructuringMember(&'a mut WithComment<ObjectDestructuringField>),
+		ArrayDestructuringMember(&'a mut ArrayDestructuringField<VariableField>),
+		ObjectDestructuringMember(&'a mut WithComment<ObjectDestructuringField<VariableField>>),
 		ClassName(Option<&'a mut VariableIdentifier>),
 		FunctionName(Option<&'a mut VariableIdentifier>),
 		ClassPropertyKey(&'a mut PropertyKey<PublicOrPrivate>),
@@ -368,12 +369,9 @@ mod structures {
 				ImmutableVariableOrProperty::ArrayDestructuringMember(_) => None,
 				ImmutableVariableOrProperty::ObjectDestructuringMember(o) => {
 					match o.get_ast_ref() {
-						ObjectDestructuringField::Spread(VariableIdentifier::Standard(a, _), _)
-						| ObjectDestructuringField::Name(
-							VariableIdentifier::Standard(a, _),
-							_,
-							_,
-						) => Some(a.as_str()),
+						ObjectDestructuringField::Name(VariableIdentifier::Standard(a, ..), ..) => {
+							Some(a.as_str())
+						}
 						_ => None,
 					}
 				}
@@ -389,7 +387,7 @@ mod structures {
 					// Just want variable names
 					None
 					// match property.get_ast_ref() {
-					// 	PropertyKey::Ident(ident, _, _)
+					// 	PropertyKey::Identifier(ident, _, _)
 					// 	| PropertyKey::StringLiteral(ident, _, _) => Some(ident.as_str()),
 					// 	PropertyKey::NumberLiteral(_, _) | PropertyKey::Computed(_, _) => None,
 					// }
@@ -398,7 +396,7 @@ mod structures {
 					// Just want variable names
 					None
 					// match property.get_ast_ref() {
-					// 	PropertyKey::Ident(ident, _, _)
+					// 	PropertyKey::Identifier(ident, _, _)
 					// 	| PropertyKey::StringLiteral(ident, _, _) => Some(ident.as_str()),
 					// 	PropertyKey::NumberLiteral(_, _) | PropertyKey::Computed(_, _) => None,
 					// }

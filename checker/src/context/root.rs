@@ -1,6 +1,5 @@
 use super::{ClosedOverReferencesInScope, Context, ContextId, ContextType};
 use crate::{
-	events::ApplicationResult,
 	features::{
 		modules::{Exported, SynthesisedModule},
 		variables::VariableOrImport,
@@ -26,10 +25,6 @@ impl ContextType for Root {
 	}
 
 	fn as_syntax(&self) -> Option<&super::Syntax> {
-		None
-	}
-
-	fn get_state_mut(&mut self) -> Option<&mut ApplicationResult> {
 		None
 	}
 
@@ -68,6 +63,7 @@ impl RootContext {
 			("void".to_owned(), TypeId::VOID_TYPE),
 			("Array".to_owned(), TypeId::ARRAY_TYPE),
 			("Promise".to_owned(), TypeId::PROMISE_TYPE),
+			("ImportMeta".to_owned(), TypeId::IMPORT_META),
 			("Function".to_owned(), TypeId::FUNCTION_TYPE),
 			("object".to_owned(), TypeId::OBJECT_TYPE),
 			("Literal".to_owned(), TypeId::LITERAL_RESTRICTION),
@@ -96,11 +92,11 @@ impl RootContext {
 			variables: HashMap::from_iter(variables),
 			variable_names: Default::default(),
 			deferred_function_constraints: Default::default(),
-			bases: Default::default(),
 			// TODO
 			can_reference_this: crate::context::CanReferenceThis::Yeah,
 			info,
 			possibly_mutated_objects: Default::default(),
+			possibly_mutated_variables: Default::default(),
 		}
 	}
 

@@ -13,33 +13,31 @@ use parser::{
 	functions::MethodHeader,
 	ASTNode, Expression,
 };
+use source_map::SpanWithSource;
 
 use crate::{
-	context::{
-		information::{get_properties_on_type, get_property_unbound},
-		Logical,
-	},
-	diagnostics::{TypeCheckError, TypeStringRepresentation},
+	context::Logical,
+	diagnostics::{TypeCheckError, TypeCheckWarning, TypeStringRepresentation},
 	features::{
 		self, await_expression,
+		conditional::new_conditional_context,
 		functions::{
 			function_to_property, register_arrow_function, register_expression_function,
 			synthesise_function, GetterSetter,
 		},
 		variables::VariableWithValue,
 	},
-	synthesis::parser_property_key_to_checker_property_key,
 	types::{
 		calling::{CallingInput, UnsynthesisedArgument},
-		properties::PropertyKey,
+		printing::{print_property_key, print_type},
+		properties::{get_properties_on_single_type, get_property_unbound, PropertyKey},
+		Constructor,
 	},
-	Decidable,
+	Decidable, PropertyValue,
 };
 
 use crate::{
-	context::information::Publicity,
 	features::{
-		assignments::Assignable,
 		objects::ObjectBuilder,
 		operations::{
 			evaluate_logical_operation_with_expression,
@@ -49,14 +47,16 @@ use crate::{
 		template_literal::synthesise_template_literal_expression,
 	},
 	types::calling::CalledWithNew,
+	types::properties::Publicity,
 	types::{Constant, TypeId},
 	CheckingData, Environment, Instance, SpecialExpressions,
 };
 
 use super::{
-	assignments::{synthesise_access_to_reference, synthesise_lhs_of_assignment_to_reference},
+	assignments::SynthesiseToAssignable,
 	classes::synthesise_class_declaration,
 	extensions::{is_expression::synthesise_is_expression, jsx::synthesise_jsx_root},
+	parser_property_key_to_checker_property_key,
 	type_annotations::synthesise_type_annotation,
 	EznoParser,
 };
@@ -147,6 +147,7 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 			let mut basis = ObjectBuilder::new(
 				Some(TypeId::ARRAY_TYPE),
 				&mut checking_data.types,
+				expression.get_position().with_source(environment.get_source()),
 				&mut environment.info,
 			);
 
@@ -163,7 +164,7 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 						Publicity::Public,
 						key,
 						crate::types::properties::PropertyValue::Value(value),
-						Some(spread_expression_position),
+						spread_expression_position,
 					);
 				}
 			}
@@ -173,14 +174,15 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 				let length = checking_data.types.new_constant_type(Constant::Number(
 					(elements.len() as f64).try_into().unwrap(),
 				));
+				let value = crate::types::properties::PropertyValue::Value(length);
 
 				// TODO: Should there be a position here?
 				basis.append(
 					environment,
 					Publicity::Public,
 					PropertyKey::String("length".into()),
-					crate::types::properties::PropertyValue::Value(length),
-					None,
+					value,
+					expression.get_position().with_source(environment.get_source()),
 				);
 			}
 
@@ -190,6 +192,7 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 			object_literal,
 			checking_data,
 			environment,
+			object_literal.position.with_source(environment.get_source()),
 			expecting,
 		)),
 		Expression::TemplateLiteral(TemplateLiteral { tag, parts, position }) => {
@@ -208,7 +211,7 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 			Instance::RValue(synthesise_template_literal_expression(
 				tag,
 				parts_iter,
-				position,
+				position.with_source(environment.get_source()),
 				environment,
 				checking_data,
 			))
@@ -380,6 +383,7 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 									let result = environment.delete_property(
 										on,
 										&PropertyKey::String(Cow::Owned(property.clone())),
+										parent.get_position().with_source(environment.get_source()),
 									);
 									return if result { TypeId::TRUE } else { TypeId::FALSE };
 								}
@@ -404,7 +408,11 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 							);
 
 							let property = PropertyKey::from_type(indexer, &checking_data.types);
-							let result = environment.delete_property(being_indexed, &property);
+							let result = environment.delete_property(
+								being_indexed,
+								&property,
+								indexee.get_position().with_source(environment.get_source()),
+							);
 							return if result { TypeId::TRUE } else { TypeId::FALSE };
 						}
 						_ => {
@@ -429,7 +437,8 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 			}
 		}
 		Expression::Assignment { lhs, rhs, position } => {
-			let lhs = synthesise_lhs_of_assignment_to_reference(lhs, environment, checking_data);
+			let lhs =
+				SynthesiseToAssignable::synthesise_to_assignable(lhs, environment, checking_data);
 
 			return environment.assign_to_assignable_handle_errors(
 				lhs,
@@ -440,11 +449,8 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 			);
 		}
 		Expression::BinaryAssignmentOperation { lhs, operator, rhs, position } => {
-			let lhs = Assignable::Reference(synthesise_access_to_reference(
-				lhs,
-				environment,
-				checking_data,
-			));
+			let lhs =
+				SynthesiseToAssignable::synthesise_to_assignable(lhs, environment, checking_data);
 
 			return environment.assign_to_assignable_handle_errors(
 				lhs,
@@ -455,11 +461,11 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 			);
 		}
 		Expression::UnaryPrefixAssignmentOperation { operator, operand, position } => {
-			let lhs = Assignable::Reference(synthesise_access_to_reference(
+			let lhs = SynthesiseToAssignable::synthesise_to_assignable(
 				operand,
 				environment,
 				checking_data,
-			));
+			);
 
 			match operator {
 				UnaryPrefixAssignmentOperator::Invert => todo!(),
@@ -485,11 +491,11 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 			}
 		}
 		Expression::UnaryPostfixAssignmentOperation { operand, operator, position } => {
-			let lhs = Assignable::Reference(synthesise_access_to_reference(
+			let lhs = SynthesiseToAssignable::synthesise_to_assignable(
 				operand,
 				environment,
 				checking_data,
-			));
+			);
 			match operator {
 				parser::expressions::operators::UnaryPostfixAssignmentOperator(direction) => {
 					let direction = match direction {
@@ -528,20 +534,18 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 				Err(_err) => Instance::RValue(TypeId::ERROR_TYPE),
 			}
 		}
-		Expression::PropertyAccess { parent, position, property, .. } => {
+		Expression::PropertyAccess { parent, position, property, is_optional: _, .. } => {
 			let on = synthesise_expression(parent, environment, checking_data, TypeId::ANY_TYPE);
-			let property = match property {
-				parser::PropertyReference::Standard { property, is_private: _ } => {
-					PropertyKey::String(Cow::Borrowed(property.as_str()))
-				}
+			let (property, publicity) = match property {
+				parser::PropertyReference::Standard { property, is_private } => (
+					PropertyKey::String(Cow::Borrowed(property.as_str())),
+					if *is_private { Publicity::Private } else { Publicity::Public },
+				),
 				parser::PropertyReference::Marker(_) => {
 					crate::utilities::notify!("Property marker found. TODO union of properties");
 					return TypeId::ERROR_TYPE;
 				}
 			};
-
-			// TODO
-			let publicity = Publicity::Public;
 
 			let result = environment.get_property_handle_errors(
 				on,
@@ -597,7 +601,7 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 						);
 						let (result, special) = call_function(
 							super_type,
-							CalledWithNew::SpecialSuperCall { this_type },
+							CalledWithNew::Super { this_type },
 							&None,
 							Some(arguments),
 							environment,
@@ -615,51 +619,6 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 						crate::utilities::notify!("TODO unlock reference to `this`");
 
 						Instance::RValue(result)
-						// let crate::ConstructorInformation {
-						// 	fields,
-						// 	class_constructor_ty,
-						// 	class_instance_ty,
-						// 	..
-						// } = checking_data
-						// 	.functions
-						// 	.constructor_information
-						// 	.get(&constructor_pointer)
-						// 	.unwrap()
-						// 	.clone();
-
-						// let super_ty = if let Type::AliasTo { to, .. } =
-						// 	environment.get_type_by_id(class_instance_ty)
-						// {
-						// 	*to
-						// } else {
-						// 	panic!("No super")
-						// };
-
-						// let this_constructor =
-						// 	environment.get_constructor_for_prototype(class_instance_ty).unwrap();
-						// let super_constructor =
-						// 	environment.get_constructor_for_prototype(super_ty).unwrap();
-
-						// let this = environment.create_this(class_instance_ty);
-
-						// let mut chain = Chain::new();
-						// let mut chain = Annex::new(&chain);
-
-						// let ty = call_function(
-						// 	super_constructor,
-						// 	&None,
-						// 	Some(arguments),
-						// 	environment,
-						// 	checking_data,
-						// 	&
-						// 	position,
-						// 	CalledWithNew::SpecialSuperCall { on: this_constructor },
-						// );
-
-						// TODO explain
-						// synthesise_class_fields(fields, environment, checking_data, &chain);
-
-						// Instance::RValue(ty)
 					}
 					SuperReference::PropertyAccess { property: _ } => todo!(),
 					SuperReference::Index { indexer: _ } => todo!(),
@@ -709,7 +668,8 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 			let condition =
 				synthesise_expression(condition, environment, checking_data, TypeId::ANY_TYPE);
 
-			Instance::RValue(environment.new_conditional_context(
+			Instance::RValue(new_conditional_context(
+				environment,
 				(condition, condition_pos),
 				|env: &mut Environment, data: &mut CheckingData<T, EznoParser>| {
 					synthesise_expression(truthy_result, env, data, expecting)
@@ -814,13 +774,11 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 					Instance::RValue(to_cast)
 				}
 			}
-			SpecialOperators::Is { value: _, type_annotation: _ } => {
-				todo!()
-			}
 			SpecialOperators::Satisfies { value, type_annotation, .. } => {
-				let value = synthesise_expression(value, environment, checking_data, expecting);
 				let satisfying =
 					synthesise_type_annotation(type_annotation, environment, checking_data);
+
+				let value = synthesise_expression(value, environment, checking_data, satisfying);
 
 				checking_data.check_satisfies(
 					value,
@@ -850,15 +808,25 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 
 				Instance::RValue(if result { TypeId::TRUE } else { TypeId::FALSE })
 			}
-			SpecialOperators::InstanceOf { .. } => {
-				checking_data.raise_unimplemented_error(
-					"instanceof expression",
-					position.with_source(environment.get_source()),
-				);
-				return TypeId::ERROR_TYPE;
+			SpecialOperators::InstanceOf { lhs, rhs } => {
+				let lhs = synthesise_expression(lhs, environment, checking_data, expecting);
+				let rhs = synthesise_expression(rhs, environment, checking_data, expecting);
+				Instance::RValue(features::instance_of_operator(
+					lhs,
+					rhs,
+					environment,
+					&mut checking_data.types,
+				))
 			}
 			SpecialOperators::NonNullAssertion(_) => todo!(),
+			SpecialOperators::Is { value: _, type_annotation: _ } => {
+				// Special non-standard
+				todo!()
+			}
 		},
+		Expression::ImportMeta(_) => {
+			Instance::RValue(checking_data.types.new_open_type(TypeId::IMPORT_META))
+		}
 		Expression::DynamicImport { position, .. } => {
 			checking_data.raise_unimplemented_error(
 				"dynamic import",
@@ -873,7 +841,7 @@ pub(super) fn synthesise_expression<T: crate::ReadFromFS>(
 
 	let position = ASTNode::get_position(expression).with_source(environment.get_source());
 
-	if checking_data.options.store_expression_type_mappings {
+	if checking_data.options.store_type_mappings {
 		checking_data.add_expression_mapping(position, instance.clone());
 	}
 
@@ -994,29 +962,152 @@ pub(super) fn synthesise_object_literal<T: crate::ReadFromFS>(
 	ObjectLiteral { members, .. }: &ObjectLiteral,
 	checking_data: &mut CheckingData<T, super::EznoParser>,
 	environment: &mut Environment,
+	position: SpanWithSource,
 	expected: TypeId,
 ) -> TypeId {
 	let mut object_builder =
-		ObjectBuilder::new(None, &mut checking_data.types, &mut environment.info);
+		ObjectBuilder::new(None, &mut checking_data.types, position, &mut environment.info);
 
 	for member in members {
 		let member_position = member.get_position().with_source(environment.get_source());
 		match member {
+			ObjectLiteralMember::Comment(..) => {
+				continue;
+			}
 			ObjectLiteralMember::Spread(spread, pos) => {
 				let spread = synthesise_expression(spread, environment, checking_data, expected);
 
 				// TODO use what about string, what about enumerable ...
-				for (_, key, value) in
-					get_properties_on_type(spread, &checking_data.types, environment)
-				{
-					object_builder.append(
-						environment,
-						Publicity::Public,
-						key,
-						// TODO what about getters
-						crate::PropertyValue::Value(value),
-						Some(pos.with_source(environment.get_source())),
-					);
+
+				match checking_data.types.get_type_by_id(spread) {
+					crate::Type::Object(_) => {
+						let get_properties_on_type = get_properties_on_single_type(
+							spread,
+							&checking_data.types,
+							environment,
+						);
+
+						for (_, key, value) in get_properties_on_type {
+							// TODO evaluate getters & check enumerability
+							object_builder.append(
+								environment,
+								Publicity::Public,
+								key,
+								value,
+								pos.with_source(environment.get_source()),
+							);
+						}
+					}
+					crate::Type::Constructor(Constructor::ConditionalResult {
+						condition,
+						truthy_result,
+						otherwise_result,
+						result_union: _,
+					}) => {
+						let truthy_properties = get_properties_on_single_type(
+							*truthy_result,
+							&checking_data.types,
+							environment,
+						);
+						let otherwise_properties = get_properties_on_single_type(
+							*otherwise_result,
+							&checking_data.types,
+							environment,
+						);
+						crate::utilities::notify!(
+							"Here {:?} {:?} {:?} {:?}",
+							truthy_properties,
+							otherwise_properties,
+							print_type(*truthy_result, &checking_data.types, environment, true),
+							print_type(*otherwise_result, &checking_data.types, environment, true)
+						);
+						// Concatenate some types here if they all have the same keys
+						// && matches!(
+						// 	(lv, rv),
+						// 	(PropertyValue::Value(..), PropertyValue::Value(..))
+						// ))
+						let same_keys = truthy_properties.len() == otherwise_properties.len()
+							&& truthy_properties
+								.iter()
+								.zip(otherwise_properties.iter())
+								.all(|((_lp, lk, _lv), (_rp, rk, _rv))| lk == rk);
+
+						// TODO really want to get like a leading prefix
+
+						// Common case
+						if same_keys {
+							let condition = *condition;
+							for ((_, key, lv), (_, _, rv)) in
+								truthy_properties.iter().zip(otherwise_properties.iter())
+							{
+								// TODO really isn't a position but okay
+								let position = pos.with_source(environment.get_source());
+								let value =
+									if let (PropertyValue::Value(l), PropertyValue::Value(r)) =
+										(lv, rv)
+									{
+										checking_data.types.new_conditional_type(condition, *l, *r)
+									} else {
+										unreachable!("checked above")
+									};
+
+								object_builder.append(
+									environment,
+									Publicity::Public,
+									key.clone(),
+									PropertyValue::Value(value),
+									position,
+								);
+							}
+						} else {
+							crate::utilities::notify!("Here");
+							for (_, key, value) in truthy_properties {
+								object_builder.append(
+									environment,
+									Publicity::Public,
+									key,
+									PropertyValue::ConditionallyExists {
+										on: *condition,
+										truthy: Box::new(value),
+									},
+									member_position,
+								);
+							}
+							let negation =
+								checking_data.types.new_logical_negation_type(*condition);
+
+							for (_, key, value) in otherwise_properties {
+								object_builder.append(
+									environment,
+									Publicity::Public,
+									key,
+									PropertyValue::ConditionallyExists {
+										on: negation,
+										truthy: Box::new(value),
+									},
+									member_position,
+								);
+							}
+						}
+					}
+					crate::Type::AliasTo { .. }
+					| crate::Type::And { .. }
+					| crate::Type::Or { .. }
+					| crate::Type::RootPolyType { .. }
+					| crate::Type::Constructor { .. }
+					| crate::Type::PartiallyAppliedGenerics { .. }
+					| crate::Type::Interface { .. }
+					| crate::Type::Class { .. }
+					| crate::Type::Constant { .. }
+					| crate::Type::FunctionReference { .. }
+					| crate::Type::SpecialObject(_) => {
+						checking_data.raise_unimplemented_error(
+							"more than binary spread",
+							pos.with_source(environment.get_source()),
+						);
+
+						return TypeId::ERROR_TYPE;
+					}
 				}
 			}
 			ObjectLiteralMember::Shorthand(name, position) => {
@@ -1045,10 +1136,10 @@ pub(super) fn synthesise_object_literal<T: crate::ReadFromFS>(
 					Publicity::Public,
 					key,
 					crate::types::properties::PropertyValue::Value(value),
-					Some(member_position),
+					member_position,
 				);
 			}
-			ObjectLiteralMember::Property { key, value, .. } => {
+			ObjectLiteralMember::Property { key, value, position, .. } => {
 				let key = parser_property_key_to_checker_property_key(
 					key.get_ast_ref(),
 					environment,
@@ -1056,29 +1147,51 @@ pub(super) fn synthesise_object_literal<T: crate::ReadFromFS>(
 					true,
 				);
 
-				// TODO needs improvement
-				let property_expecting = get_property_unbound(
-					expected,
-					Publicity::Public,
-					&key,
-					&checking_data.types,
+				let position_with_source = position.with_source(environment.get_source());
+
+				let maybe_property_expecting = get_property_unbound(
+					(expected, None),
+					(Publicity::Public, &key, None),
 					environment,
-				)
-				.ok()
-				.and_then(|l| if let Logical::Pure(l) = l { Some(l.as_get_type()) } else { None })
-				.unwrap_or(TypeId::ANY_TYPE);
+					&checking_data.types,
+				);
+
+				if expected != TypeId::ANY_TYPE
+					&& expected != TypeId::OBJECT_TYPE
+					&& maybe_property_expecting.is_err()
+				{
+					checking_data.diagnostics_container.add_warning(
+						TypeCheckWarning::ExcessProperty {
+							position: position_with_source,
+							expected_type: TypeStringRepresentation::from_type_id(
+								expected,
+								environment,
+								&checking_data.types,
+								checking_data.options.debug_types,
+							),
+							excess_property_name: print_property_key(
+								&key,
+								&checking_data.types,
+								environment,
+								false,
+							),
+						},
+					);
+				}
+
+				// TODO needs improvement
+				let property_expecting = maybe_property_expecting
+					.ok()
+					.and_then(
+						|l| if let Logical::Pure(l) = l { Some(l.as_get_type()) } else { None },
+					)
+					.unwrap_or(TypeId::ANY_TYPE);
 
 				let value =
 					synthesise_expression(value, environment, checking_data, property_expecting);
 
 				let value = crate::types::properties::PropertyValue::Value(value);
-				object_builder.append(
-					environment,
-					Publicity::Public,
-					key,
-					value,
-					Some(member_position),
-				);
+				object_builder.append(environment, Publicity::Public, key, value, member_position);
 
 				// let property_name: PropertyName<'static> = property_key.into();
 
@@ -1109,11 +1222,10 @@ pub(super) fn synthesise_object_literal<T: crate::ReadFromFS>(
 
 				// TODO needs improvement
 				let property_expecting = get_property_unbound(
-					expected,
-					Publicity::Public,
-					&key,
-					&checking_data.types,
+					(expected, None),
+					(Publicity::Public, &key, None),
 					environment,
+					&checking_data.types,
 				)
 				.ok()
 				.and_then(|l| if let Logical::Pure(l) = l { Some(l.as_get_type()) } else { None })
@@ -1141,7 +1253,7 @@ pub(super) fn synthesise_object_literal<T: crate::ReadFromFS>(
 					Publicity::Public,
 					key,
 					property,
-					Some(member_position),
+					member_position,
 				);
 			}
 		}

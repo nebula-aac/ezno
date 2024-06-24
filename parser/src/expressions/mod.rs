@@ -1,9 +1,9 @@
 use crate::{
-	declarations::ClassDeclaration, derive_ASTNode, errors::parse_lexing_error, functions,
-	parse_bracketed, throw_unexpected_token_with_token, to_string_bracketed,
-	type_annotations::generic_arguments_from_reader_sub_open_angle, ExpressionPosition,
-	FunctionHeader, ListItem, Marker, NumberRepresentation, ParseErrors, ParseResult, Quoted,
-	TSXKeyword,
+	are_nodes_over_length, declarations::ClassDeclaration, derive_ASTNode,
+	errors::parse_lexing_error, functions, parse_bracketed, throw_unexpected_token_with_token,
+	to_string_bracketed, type_annotations::generic_arguments_from_reader_sub_open_angle,
+	ExpressionPosition, FunctionHeader, ListItem, Marker, NumberRepresentation, ParseErrors,
+	ParseResult, Quoted, TSXKeyword,
 };
 
 use self::{
@@ -27,8 +27,8 @@ use crate::extensions::is_expression::{is_expression_from_reader_sub_is_keyword,
 
 use derive_partial_eq_extras::PartialEqExtras;
 use get_field_by_type::GetFieldByType;
-use source_map::Nullable;
-use tokenizer_lib::sized_tokens::{TokenEnd, TokenReaderWithTokenEnds, TokenStart};
+use source_map::{Nullable, ToString};
+use tokenizer_lib::sized_tokens::{SizedToken, TokenEnd, TokenReaderWithTokenEnds, TokenStart};
 use visitable_derive::Visitable;
 
 pub mod arrow_function;
@@ -115,6 +115,7 @@ pub enum Expression {
 	SuperExpression(SuperReference, Span),
 	/// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/new.target
 	NewTarget(Span),
+	ImportMeta(Span),
 	DynamicImport {
 		path: Box<Expression>,
 		options: Option<Box<Expression>>,
@@ -182,7 +183,7 @@ pub enum Expression {
 
 impl Eq for Expression {}
 
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone)]
 #[apply(derive_ASTNode)]
 pub enum PropertyReference {
 	Standard {
@@ -269,13 +270,21 @@ impl Expression {
 				let mut position = start.with_length(pattern.len());
 				let flag_token =
 					reader.conditional_next(|t| matches!(t, TSXToken::RegexFlagLiteral(..)));
-				let flags =
-					if let Some(Token(TSXToken::RegexFlagLiteral(flags), start)) = flag_token {
-						position = position.union(start.get_end_after(flags.len()));
-						Some(flags)
-					} else {
-						None
-					};
+				let flags = if let Some(Token(TSXToken::RegexFlagLiteral(flags), start)) =
+					flag_token
+				{
+					if flags.contains(|chr| !matches!(chr, 'd' | 'g' | 'i' | 'm' | 's' | 'u' | 'y'))
+					{
+						return Err(ParseError::new(
+							ParseErrors::InvalidRegexFlag,
+							start.with_length(flags.len()),
+						));
+					}
+					position = position.union(start.get_end_after(flags.len()));
+					Some(flags)
+				} else {
+					None
+				};
 				Expression::RegexLiteral { pattern, flags, position }
 			}
 			t @ Token(TSXToken::Keyword(TSXKeyword::True), _) => {
@@ -287,25 +296,36 @@ impl Expression {
 			t @ Token(TSXToken::Keyword(TSXKeyword::This), _) => {
 				Expression::ThisReference(t.get_span())
 			}
-			Token(TSXToken::Keyword(TSXKeyword::Import), start) => {
-				let _ = reader.expect_next(TSXToken::OpenParentheses)?;
-				let path = Expression::from_reader(reader, state, options)?;
-				if let Expression::StringLiteral(path, ..) = &path {
-					state.constant_imports.push(path.clone());
+			t @ Token(TSXToken::Keyword(TSXKeyword::Import), start) => {
+				let token = reader.next();
+				if let Some(Token(TSXToken::Dot, _)) = token {
+					let meta_start = reader.expect_next(TSXToken::Identifier("meta".into()))?;
+					Expression::ImportMeta(start.union(meta_start.get_end_after("meta".len())))
+				} else if let Some(Token(TSXToken::OpenParentheses, _)) = token {
+					let path = Expression::from_reader(reader, state, options)?;
+					if let Expression::StringLiteral(path, ..) = &path {
+						state.constant_imports.push(path.clone());
+					}
+
+					let options =
+						if reader.conditional_next(|t| matches!(t, TSXToken::Comma)).is_some() {
+							Some(Box::new(Expression::from_reader(reader, state, options)?))
+						} else {
+							None
+						};
+					let end = reader.expect_next(TSXToken::CloseParentheses)?;
+					Expression::DynamicImport {
+						path: Box::new(path),
+						options,
+						position: start.union(end.get_end_after(1)),
+					}
+				} else if let Some(token) = token {
+					return throw_unexpected_token_with_token(
+						token,
+						&[TSXToken::Dot, TSXToken::OpenParentheses],
+					);
 				} else {
-					// TODO warning dynamic
-				}
-				let options = if reader.conditional_next(|t| matches!(t, TSXToken::Comma)).is_some()
-				{
-					Some(Box::new(Expression::from_reader(reader, state, options)?))
-				} else {
-					None
-				};
-				let end = reader.expect_next(TSXToken::OpenParentheses)?;
-				Expression::DynamicImport {
-					path: Box::new(path),
-					options,
-					position: start.union(end.get_end_after(1)),
+					return Err(ParseError::new(ParseErrors::LexingFailed, t.get_span()));
 				}
 			}
 			t @ Token(TSXToken::Keyword(TSXKeyword::Super), _) => {
@@ -323,7 +343,7 @@ impl Expression {
 						)
 					}
 					Token(TSXToken::OpenParentheses, _) => {
-						let (arguments, end_pos) = parse_bracketed(
+						let (arguments, _, end_pos) = parse_bracketed(
 							reader,
 							state,
 							options,
@@ -374,7 +394,7 @@ impl Expression {
 				Expression::UnaryOperation { operator, operand: Box::new(operand), position }
 			}
 			Token(TSXToken::OpenBracket, start) => {
-				let (items, end) = parse_bracketed::<ArrayElement>(
+				let (items, _, end) = parse_bracketed::<ArrayElement>(
 					reader,
 					state,
 					options,
@@ -460,7 +480,7 @@ impl Expression {
 						.conditional_next(|token| *token == TSXToken::OpenChevron)
 						.is_some()
 					{
-						let (generic_arguments, end_pos) =
+						let (generic_arguments, _, end_pos) =
 							parse_bracketed(reader, state, options, None, TSXToken::CloseChevron)?;
 						(Some(generic_arguments), end_pos)
 					} else {
@@ -472,7 +492,7 @@ impl Expression {
 						.is_some()
 					{
 						parse_bracketed(reader, state, options, None, TSXToken::CloseParentheses)
-							.map(|(args, end)| (Some(args), end))?
+							.map(|(args, _, end)| (Some(args), end))?
 					} else {
 						// TODO are type arguments not allowed...?
 						(None, end)
@@ -869,7 +889,7 @@ impl Expression {
 					}
 					let next = reader.next().unwrap();
 					let is_optional = matches!(next.0, TSXToken::OptionalCall);
-					let (arguments, end) =
+					let (arguments, _, end) =
 						parse_bracketed(reader, state, options, None, TSXToken::CloseParentheses)?;
 					let position = top.get_position().union(end);
 					top = Expression::FunctionCall {
@@ -967,6 +987,10 @@ impl Expression {
 					{
 						return Ok(top);
 					}
+
+					let position = top.get_position();
+					let lhs: LHSOfAssignment = top.try_into()?;
+
 					let Token(_assignment, assignment_pos) = reader.next().unwrap();
 					let new_rhs = Self::from_reader_with_precedence(
 						reader,
@@ -975,11 +999,28 @@ impl Expression {
 						parent_precedence,
 						Some(assignment_pos),
 					)?;
-					let position = top.get_position().union(new_rhs.get_position());
-					let lhs = top.try_into()?;
+
+					let position = position.union(new_rhs.get_position());
+
 					top = Expression::Assignment { position, lhs, rhs: Box::new(new_rhs) };
 				}
-				TSXToken::MultiLineComment(_) | TSXToken::Comment(_) => {
+				TSXToken::Comment(_) => {
+					// TODO while not comment
+					if reader.peek_n(1).is_some_and(|t| t.0.is_expression_postfix()) {
+						let (content, is_multiline, position) =
+							TSXToken::try_into_comment(reader.next().unwrap()).unwrap();
+						top = Expression::Comment {
+							content,
+							on: Box::new(top),
+							position,
+							is_multiline,
+							prefix: false,
+						};
+					} else {
+						return Ok(top);
+					}
+				}
+				TSXToken::MultiLineComment(_) => {
 					let (content, is_multiline, position) =
 						TSXToken::try_into_comment(reader.next().unwrap()).unwrap();
 					top = Expression::Comment {
@@ -1099,7 +1140,7 @@ impl Expression {
 							let (type_arguments, _) = generic_arguments_from_reader_sub_open_angle(
 								reader, state, options, None,
 							)?;
-							let (arguments, end) = parse_bracketed(
+							let (arguments, _, end) = parse_bracketed(
 								reader,
 								state,
 								options,
@@ -1143,7 +1184,16 @@ impl Expression {
 						{
 							return Ok(top);
 						}
-						let Token(_, op_pos) = reader.next().unwrap();
+
+						let Token(token, op_pos) = reader.next().unwrap();
+
+						if !options.extra_operators && operator.is_non_standard() {
+							return Err(ParseError::new(
+								ParseErrors::NonStandardSyntaxUsedWithoutEnabled,
+								op_pos.with_length(token.length() as usize),
+							));
+						}
+
 						// Note precedence is already handled
 						let rhs = Self::from_reader_with_precedence(
 							reader,
@@ -1210,6 +1260,7 @@ impl Expression {
 			| Self::SuperExpression(..)
 			| Self::NewTarget(..)
 			| Self::ClassExpression(..)
+			| Self::ImportMeta(..)
 			| Self::DynamicImport { .. }
 			| Self::Marker { .. } => PARENTHESIZED_EXPRESSION_AND_LITERAL_PRECEDENCE,
 			Self::BinaryOperation { operator, .. } => operator.precedence(),
@@ -1453,7 +1504,7 @@ impl Expression {
 			}
 			Self::Assignment { lhs, rhs, .. } => {
 				let require_parenthesis =
-					matches!(lhs, LHSOfAssignment::ObjectDestructuring(..)) && local2.on_left;
+					matches!(lhs, LHSOfAssignment::ObjectDestructuring { .. }) && local2.on_left;
 
 				if require_parenthesis {
 					buf.push('(');
@@ -1492,12 +1543,20 @@ impl Expression {
 			Self::NewTarget(..) => {
 				buf.push_str("new.target");
 			}
+			Self::ImportMeta(..) => {
+				buf.push_str("import.meta");
+			}
 			Self::DynamicImport { path, .. } => {
 				buf.push_str("import(");
 				path.to_string_from_buffer(buf, options, local);
 				buf.push(')');
 			}
 			Self::PropertyAccess { parent, property, is_optional, position, .. } => {
+				if options.enforce_limit_length_limit() && local.should_try_pretty_print {
+					chain_to_string_from_buffer(self, buf, options, local);
+					return;
+				}
+
 				buf.add_mapping(&position.with_source(local.under));
 
 				// TODO number okay, others don't quite get?
@@ -1583,9 +1642,6 @@ impl Expression {
 					}
 				}
 			}
-			Self::ArrayLiteral(values, _) => {
-				to_string_bracketed(values, ('[', ']'), buf, options, local);
-			}
 			Self::JSXRoot(root) => root.to_string_from_buffer(buf, options, local),
 			Self::ArrowFunction(arrow_function) => {
 				// `async () => {}` looks like async statement declaration when in declaration
@@ -1606,11 +1662,63 @@ impl Expression {
 					buf.push(')');
 				}
 			}
+			Self::ArrayLiteral(values, _) => {
+				// Fix, see: https://github.com/kaleidawave/ezno/pull/158#issuecomment-2169621017
+				if options.pretty && options.enforce_limit_length_limit() {
+					const MAX_INLINE_OBJECT_LITERAL: u32 = 40;
+
+					let values_are_all_booleans_or_numbers =
+						values.first().and_then(ArrayElement::inner_ref).is_some_and(|e| {
+							matches!(
+								e,
+								Expression::BooleanLiteral(..) | Expression::NumberLiteral(..)
+							)
+						}) && values.iter().all(|e| {
+							e.inner_ref().is_some_and(|e| {
+								matches!(
+									e,
+									Expression::BooleanLiteral(..) | Expression::NumberLiteral(..)
+								)
+							})
+						}) && are_nodes_over_length(
+							values.iter(),
+							options,
+							local,
+							Some(MAX_INLINE_OBJECT_LITERAL),
+							true,
+						);
+
+					if values_are_all_booleans_or_numbers {
+						buf.push('[');
+						let inner_local = local.next_level();
+						buf.push_new_line();
+						options.add_indent(inner_local.depth, buf);
+						for (at_end, node) in
+							iterator_endiate::EndiateIteratorExt::endiate(values.iter())
+						{
+							if buf.characters_on_current_line() > MAX_INLINE_OBJECT_LITERAL {
+								buf.push_new_line();
+								options.add_indent(inner_local.depth, buf);
+							}
+							node.to_string_from_buffer(buf, options, inner_local);
+							if !at_end {
+								buf.push(',');
+								options.push_gap_optionally(buf);
+							}
+						}
+						buf.push_new_line();
+						options.add_indent(local.depth, buf);
+						buf.push(']');
+						return;
+					};
+				}
+				to_string_bracketed(values, ('[', ']'), buf, options, local);
+			}
 			Self::ObjectLiteral(object_literal) => {
 				if local2.on_left {
 					buf.push('(');
 				}
-				object_literal.to_string_from_buffer(buf, options, local);
+				to_string_bracketed(&object_literal.members, ('{', '}'), buf, options, local);
 				if local2.on_left {
 					buf.push(')');
 				}
@@ -1669,20 +1777,42 @@ impl Expression {
 				buf.push('`');
 			}
 			Self::ConditionalTernary { condition, truthy_result, falsy_result, .. } => {
+				let available_space = u32::from(options.max_line_length)
+					.saturating_sub(buf.characters_on_current_line());
+
+				let split_lines = crate::are_nodes_over_length(
+					[condition, truthy_result, falsy_result].iter().map(AsRef::as_ref),
+					options,
+					local,
+					Some(available_space),
+					true,
+				);
 				condition.to_string_using_precedence(
 					buf,
 					options,
 					local,
 					local2.with_precedence(CONDITIONAL_TERNARY_PRECEDENCE),
 				);
-				buf.push_str(if options.pretty { " ? " } else { "?" });
+				if split_lines {
+					buf.push_new_line();
+					options.add_indent(local.depth + 1, buf);
+					buf.push_str("? ");
+				} else {
+					buf.push_str(if options.pretty { " ? " } else { "?" });
+				}
 				truthy_result.to_string_using_precedence(
 					buf,
 					options,
 					local,
 					local2.with_precedence(CONDITIONAL_TERNARY_PRECEDENCE).on_right(),
 				);
-				buf.push_str(if options.pretty { " : " } else { ":" });
+				if split_lines {
+					buf.push_new_line();
+					options.add_indent(local.depth + 1, buf);
+					buf.push_str(": ");
+				} else {
+					buf.push_str(if options.pretty { " : " } else { ":" });
+				}
 				falsy_result.to_string_using_precedence(
 					buf,
 					options,
@@ -1748,7 +1878,7 @@ impl ExpressionToStringArgument {
 
 /// Represents expressions under the comma operator
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEq, Eq, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, Clone, PartialEq, Visitable, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub enum MultipleExpression {
 	Multiple { lhs: Box<MultipleExpression>, rhs: Expression, position: Span },
@@ -1896,19 +2026,19 @@ pub(crate) fn arguments_to_string<T: source_map::ToString>(
 	local: crate::LocalToStringInformation,
 ) {
 	buf.push('(');
-	let add_new_lines = if options.enforce_limit_length_limit() {
-		let mut acc = 0u16;
-		let available_space = u16::from(options.max_line_length);
-		for node in nodes {
-			acc += crate::get_length_of_node(node, options, local, i32::from(available_space));
-			if acc > available_space {
-				break;
-			}
-		}
-		acc > available_space
-	} else {
-		false
-	};
+	if nodes.is_empty() {
+		buf.push(')');
+		return;
+	}
+
+	let add_new_lines = are_nodes_over_length(
+		nodes.iter(),
+		options,
+		local,
+		Some(u32::from(options.max_line_length).saturating_sub(buf.characters_on_current_line())),
+		true,
+	);
+
 	if add_new_lines {
 		buf.push_new_line();
 		options.add_indent(local.depth + 1, buf);
@@ -1985,7 +2115,7 @@ pub enum SpecialOperators {
 
 #[cfg(feature = "full-typescript")]
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEq, Eq, Visitable)]
+#[derive(Debug, Clone, PartialEq, Visitable)]
 pub enum TypeOrConst {
 	Type(Box<TypeAnnotation>),
 	Const(Span),
@@ -2000,14 +2130,16 @@ pub enum InExpressionLHS {
 }
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEq, Eq, Visitable)]
+#[derive(Debug, Clone, PartialEq, Visitable)]
 pub enum FunctionArgument {
 	Spread(Expression, Span),
 	Standard(Expression),
 	Comment { content: String, is_multiline: bool, position: Span },
 }
 
-impl ListItem for FunctionArgument {}
+impl ListItem for FunctionArgument {
+	type LAST = ();
+}
 
 impl ASTNode for FunctionArgument {
 	fn from_reader(
@@ -2110,7 +2242,7 @@ impl From<Expression> for FunctionArgument {
 	}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Visitable)]
+#[derive(Debug, Clone, PartialEq, Visitable)]
 #[apply(derive_ASTNode)]
 pub struct ArrayElement(pub Option<FunctionArgument>);
 
@@ -2139,8 +2271,25 @@ impl ASTNode for ArrayElement {
 	}
 }
 
+impl ArrayElement {
+	/// For utility purposes! Loses spread information
+	#[must_use]
+	pub fn inner_ref(&self) -> Option<&Expression> {
+		if let Some(ref inner) = self.0 {
+			match inner {
+				FunctionArgument::Spread(expr, _) | FunctionArgument::Standard(expr) => Some(expr),
+				FunctionArgument::Comment { .. } => None,
+			}
+		} else {
+			None
+		}
+	}
+}
+
 impl ListItem for ArrayElement {
 	const EMPTY: Option<Self> = Some(Self(None));
+
+	type LAST = ();
 }
 
 // Utils for Expression
@@ -2221,6 +2370,122 @@ pub enum SuperReference {
 	Call { arguments: Vec<FunctionArgument> },
 	PropertyAccess { property: String },
 	Index { indexer: Box<Expression> },
+}
+
+pub(crate) fn chain_to_string_from_buffer<T: source_map::ToString>(
+	original: &Expression,
+	buf: &mut T,
+	options: &crate::ToStringOptions,
+	local: crate::LocalToStringInformation,
+) {
+	let mut chain = Vec::new();
+
+	let split_between_lines = if options.enforce_limit_length_limit() {
+		let room =
+			u32::from(options.max_line_length).saturating_sub(buf.characters_on_current_line());
+
+		let mut buf = source_map::StringWithOptionalSourceMap {
+			source: String::new(),
+			source_map: None,
+			quit_after: Some(room as usize),
+			since_new_line: 0,
+		};
+		let mut over = false;
+		let mut cur = Some(original);
+		while let Some(node) = cur {
+			chain.push(node);
+			// Just measure the link in change (not the parent)
+			cur = match node {
+				Expression::PropertyAccess { parent, property, .. } => {
+					match property {
+						PropertyReference::Standard { property, .. } => buf.push_str(property),
+						PropertyReference::Marker(_) => {}
+					}
+					Some(parent)
+				}
+				Expression::Index { indexer, indexee, .. } => {
+					indexer.to_string_from_buffer(&mut buf, options, local);
+					Some(indexee)
+				}
+				Expression::FunctionCall { function, type_arguments, arguments, .. } => {
+					if let (true, Some(type_arguments)) =
+						(options.include_type_annotations, type_arguments)
+					{
+						to_string_bracketed(type_arguments, ('<', '>'), &mut buf, options, local);
+					}
+					arguments_to_string(arguments, &mut buf, options, local);
+					Some(function)
+				}
+				expression => {
+					expression.to_string_from_buffer(&mut buf, options, local);
+					None
+				}
+			};
+
+			if buf.should_halt() {
+				over = true;
+				// Continue to build chain
+			}
+		}
+		over
+	} else {
+		false
+	};
+
+	if split_between_lines && !chain.is_empty() {
+		let mut items = chain.into_iter().rev();
+		items.next().unwrap().to_string_from_buffer(buf, options, local);
+
+		for item in items {
+			// Just measure the link in change (not the parent)
+			match item {
+				Expression::PropertyAccess { property, is_optional, .. } => {
+					buf.push_new_line();
+					options.add_indent(local.depth + 1, buf);
+					if *is_optional {
+						buf.push_str("?.");
+					} else {
+						buf.push('.');
+					}
+					match property {
+						PropertyReference::Standard { property, is_private } => {
+							if *is_private {
+								buf.push('#');
+							}
+							buf.push_str(property);
+						}
+						PropertyReference::Marker(..) => {
+							assert!(options.expect_markers, "found marker");
+						}
+					}
+				}
+				Expression::Index { indexer, is_optional, .. } => {
+					buf.push_new_line();
+					options.add_indent(local.depth + 1, buf);
+					if *is_optional {
+						buf.push_str("?.");
+					}
+					buf.push('[');
+					indexer.to_string_from_buffer(buf, options, local);
+					buf.push(']');
+				}
+				Expression::FunctionCall { type_arguments, arguments, is_optional, .. } => {
+					if *is_optional {
+						buf.push_str("?.");
+					}
+					if let (true, Some(type_arguments)) =
+						(options.include_type_annotations, type_arguments)
+					{
+						to_string_bracketed(type_arguments, ('<', '>'), buf, options, local);
+					}
+					arguments_to_string(arguments, buf, options, local);
+				}
+				_ => unreachable!(),
+			}
+		}
+	} else {
+		original.to_string_from_buffer(buf, options, local.do_not_pretty_print());
+	}
 }
 
 #[cfg(test)]

@@ -1,9 +1,13 @@
-use source_map::Span;
+use source_map::SpanWithSource;
 
 use crate::{
 	context::invocation::CheckThings,
+	diagnostics::TypeCheckError,
 	features::objects::ObjectBuilder,
-	types::{calling::CallingInput, cast_as_string, SynthesisedArgument, TypeStore},
+	types::{
+		calling::{application_result_to_return_type, CallingInput},
+		cast_as_string, SynthesisedArgument, TypeStore,
+	},
 	CheckingData, Constant, Environment, Type, TypeId,
 };
 
@@ -17,7 +21,7 @@ pub enum TemplateLiteralPart<'a, T> {
 pub fn synthesise_template_literal_expression<'a, T, A>(
 	tag: Option<TypeId>,
 	mut parts_iter: impl Iterator<Item = TemplateLiteralPart<'a, A::Expression<'a>>> + 'a,
-	position: &Span,
+	position: SpanWithSource,
 	environment: &mut Environment,
 	checking_data: &mut CheckingData<T, A>,
 ) -> TypeId
@@ -60,6 +64,7 @@ where
 		let mut static_parts = ObjectBuilder::new(
 			Some(TypeId::ARRAY_TYPE),
 			&mut checking_data.types,
+			position,
 			&mut environment.info,
 		);
 
@@ -72,19 +77,24 @@ where
 					let value = part_to_type(p, environment, checking_data);
 					static_parts.append(
 						environment,
-						crate::context::information::Publicity::Public,
+						crate::types::properties::Publicity::Public,
 						crate::types::properties::PropertyKey::from_usize(static_part_count.into()),
 						crate::PropertyValue::Value(value),
 						// TODO should static parts should have position?
-						None,
+						position,
 					);
 					static_part_count += 1;
 				}
-				p @ TemplateLiteralPart::Dynamic(_) => {
+				TemplateLiteralPart::Dynamic(expression) => {
+					let position =
+						A::expression_position(expression).with_source(environment.get_source());
 					arguments.push(SynthesisedArgument {
-						value: part_to_type(p, environment, checking_data),
-						// TODO position
-						position: source_map::Nullable::NULL,
+						value: part_to_type(
+							TemplateLiteralPart::Dynamic(expression),
+							environment,
+							checking_data,
+						),
+						position,
 						spread: false,
 					});
 				}
@@ -100,10 +110,10 @@ where
 			// TODO: Should there be a position here?
 			static_parts.append(
 				environment,
-				crate::context::information::Publicity::Public,
+				crate::types::properties::Publicity::Public,
 				crate::types::properties::PropertyKey::String("length".into()),
 				crate::types::properties::PropertyValue::Value(length),
-				None,
+				position,
 			);
 		}
 
@@ -117,13 +127,11 @@ where
 			},
 		);
 
-		let call_site = position.with_source(environment.get_source());
-
 		let mut check_things = CheckThings { debug_types: checking_data.options.debug_types };
 
 		let input = CallingInput {
 			called_with_new: crate::types::calling::CalledWithNew::None,
-			call_site,
+			call_site: position,
 			call_site_type_arguments: None,
 		};
 		match crate::types::calling::call_type(
@@ -134,9 +142,16 @@ where
 			&mut check_things,
 			&mut checking_data.types,
 		) {
-			Ok(res) => res.returned_type,
-			Err(_) => {
-				todo!("Template literal tag Calling error")
+			Ok(res) => {
+				application_result_to_return_type(res.result, environment, &mut checking_data.types)
+			}
+			Err(error) => {
+				error.errors.into_iter().for_each(|error| {
+					checking_data
+						.diagnostics_container
+						.add_error(TypeCheckError::TemplateLiteralError(error));
+				});
+				error.returned_type
 			}
 		}
 	} else {
@@ -167,6 +182,7 @@ where
 }
 
 /// **Expects static part first**
+///
 /// TODO API is different to the `synthesise_template_literal_expression` above
 pub fn synthesize_template_literal_type(parts: Vec<TypeId>, types: &mut TypeStore) -> TypeId {
 	let mut parts_iter = parts.into_iter();

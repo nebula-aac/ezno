@@ -2,16 +2,19 @@ use std::borrow::Cow;
 
 use parser::{
 	declarations::VariableDeclarationItem, ASTNode, ArrayDestructuringField,
-	ObjectDestructuringField, VariableField, VariableIdentifier,
+	ObjectDestructuringField, SpreadDestructuringField, VariableField, VariableIdentifier,
 };
 
 use super::expressions::synthesise_expression;
 use crate::{
-	context::{information::Publicity, Context, ContextType, VariableRegisterArguments},
+	context::{Context, ContextType, VariableRegisterArguments},
 	diagnostics::{PropertyRepresentation, TypeCheckError, TypeStringRepresentation},
 	features::variables::{get_new_register_argument_under, VariableMutability},
 	synthesis::parser_property_key_to_checker_property_key,
-	types::{printing, properties::PropertyKey},
+	types::{
+		printing,
+		properties::{PropertyKey, Publicity},
+	},
 	CheckingData, Environment, TypeId,
 };
 
@@ -37,6 +40,7 @@ pub(crate) fn register_variable_identifier<T: crate::ReadFromFS, V: ContextType>
 				argument,
 				pos.with_source(environment.get_source()),
 				&mut checking_data.diagnostics_container,
+				checking_data.options.record_all_assignments_and_reads,
 			);
 		}
 		parser::VariableIdentifier::Marker(..) => {
@@ -46,6 +50,8 @@ pub(crate) fn register_variable_identifier<T: crate::ReadFromFS, V: ContextType>
 }
 
 /// For eagerly registering variables, before the statement and its RHS is actually evaluate
+///
+/// TODO type annotations extras
 pub(crate) fn register_variable<T: crate::ReadFromFS>(
 	name: &parser::VariableField,
 	environment: &mut Environment,
@@ -56,25 +62,28 @@ pub(crate) fn register_variable<T: crate::ReadFromFS>(
 		parser::VariableField::Name(variable) => {
 			register_variable_identifier(variable, environment, checking_data, argument);
 		}
-		parser::VariableField::Array(items, _) => {
-			for (idx, field) in items.iter().enumerate() {
+		parser::VariableField::Array { members, spread, position: _ } => {
+			if let Some(_spread) = spread {
+				todo!()
+			}
+			for (idx, field) in members.iter().enumerate() {
 				match field.get_ast_ref() {
-					ArrayDestructuringField::Spread(variable, _pos) => {
-						// TODO
-						let argument = VariableRegisterArguments {
-							constant: argument.constant,
-							space: argument.space,
-							initial_value: argument.initial_value,
-						};
-						register_variable(
-							variable,
-							environment,
-							checking_data,
-							// TODO
-							argument,
-						);
-					}
-					ArrayDestructuringField::Name(name, _initial_value) => {
+					// ArrayDestructuringField::Spread(variable, _pos) => {
+					// 	// TODO
+					// 	let argument = VariableRegisterArguments {
+					// 		constant: argument.constant,
+					// 		space: argument.space,
+					// 		initial_value: argument.initial_value,
+					// 	};
+					// 	register_variable(
+					// 		variable,
+					// 		environment,
+					// 		checking_data,
+					// 		// TODO
+					// 		argument,
+					// 	);
+					// }
+					ArrayDestructuringField::Name(name, _type, _initial_value) => {
 						// TODO account for spread in `idx`
 						let key = PropertyKey::from_usize(idx);
 						let argument = get_new_register_argument_under(
@@ -90,10 +99,10 @@ pub(crate) fn register_variable<T: crate::ReadFromFS>(
 				}
 			}
 		}
-		parser::VariableField::Object(items, _) => {
-			for field in items {
+		parser::VariableField::Object { members, spread, .. } => {
+			for field in members {
 				match field.get_ast_ref() {
-					ObjectDestructuringField::Name(variable, ..) => {
+					ObjectDestructuringField::Name(variable, _type, ..) => {
 						let name = match variable {
 							VariableIdentifier::Standard(ref name, _) => name,
 							VariableIdentifier::Marker(_, _) => "?",
@@ -113,21 +122,10 @@ pub(crate) fn register_variable<T: crate::ReadFromFS>(
 							argument,
 						);
 					}
-					ObjectDestructuringField::Spread(variable, _) => {
-						register_variable_identifier(
-							variable,
-							environment,
-							checking_data,
-							// TODO
-							VariableRegisterArguments {
-								constant: argument.constant,
-								space: argument.space,
-								initial_value: argument.initial_value,
-							},
-						);
-					}
 					ObjectDestructuringField::Map {
 						from,
+						// TODO
+						annotation: _,
 						name,
 						default_value: _default_value,
 						position,
@@ -148,6 +146,19 @@ pub(crate) fn register_variable<T: crate::ReadFromFS>(
 						register_variable(name.get_ast_ref(), environment, checking_data, argument);
 					}
 				}
+			}
+			if let Some(SpreadDestructuringField(variable, _position)) = spread {
+				register_variable(
+					variable,
+					environment,
+					checking_data,
+					// TODO
+					VariableRegisterArguments {
+						constant: argument.constant,
+						space: argument.space,
+						initial_value: argument.initial_value,
+					},
+				);
 			}
 		}
 	}
@@ -184,15 +195,24 @@ pub(super) fn synthesise_variable_declaration_item<
 			super::expressions::synthesise_expression(value, environment, checking_data, expecting);
 
 		if let Some((var_ty, ta_pos)) = var_ty_and_pos {
-			crate::features::variables::check_variable_initialization(
+			let is_valid = crate::features::variables::check_variable_initialization(
 				(var_ty, ta_pos),
 				(value_ty, value.get_position().with_source(environment.get_source())),
 				environment,
 				checking_data,
 			);
-		}
 
-		value_ty
+			// crate::utilities::notify!("{:?} {:?}", is_valid, variable_declaration);
+
+			if !is_valid || value_ty == TypeId::ERROR_TYPE {
+				// If error, then create a new type like the annotation
+				checking_data.types.new_error_type(var_ty)
+			} else {
+				value_ty
+			}
+		} else {
+			value_ty
+		}
 	} else {
 		TypeId::UNDEFINED_TYPE
 	};
@@ -232,10 +252,10 @@ fn assign_initial_to_fields<T: crate::ReadFromFS>(
 				}
 			}
 		}
-		VariableField::Array(_items, pos) => {
+		VariableField::Array { members: _, spread: _, position } => {
 			checking_data.raise_unimplemented_error(
 				"destructuring array (needs iterator)",
-				pos.with_source(environment.get_source()),
+				position.with_source(environment.get_source()),
 			);
 			// for (idx, item) in items.iter().enumerate() {
 			// 	match item.get_ast_ref() {
@@ -265,11 +285,10 @@ fn assign_initial_to_fields<T: crate::ReadFromFS>(
 			// 		ArrayDestructuringField::Comment { .. } | ArrayDestructuringField::None => {}
 			//   }
 		}
-		VariableField::Object(items, _) => {
-			for item in items {
-				match item.get_ast_ref() {
-					ObjectDestructuringField::Spread(_, _) => todo!(),
-					ObjectDestructuringField::Name(name, default_value, _) => {
+		VariableField::Object { members, spread, .. } => {
+			for member in members {
+				match member.get_ast_ref() {
+					ObjectDestructuringField::Name(name, _, default_value, _) => {
 						let position = name.get_position().with_source(environment.get_source());
 						let id = crate::VariableId(environment.get_source(), position.start);
 
@@ -337,7 +356,13 @@ fn assign_initial_to_fields<T: crate::ReadFromFS>(
 
 						environment.register_initial_variable_declaration_value(id, value);
 					}
-					ObjectDestructuringField::Map { from, name, default_value, position } => {
+					ObjectDestructuringField::Map {
+						from,
+						name,
+						annotation: _,
+						default_value,
+						position,
+					} => {
 						let key_ty = super::parser_property_key_to_checker_property_key(
 							from,
 							environment,
@@ -411,6 +436,9 @@ fn assign_initial_to_fields<T: crate::ReadFromFS>(
 						);
 					}
 				}
+			}
+			if let Some(_spread) = spread {
+				todo!()
 			}
 		}
 	}

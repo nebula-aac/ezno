@@ -20,7 +20,7 @@ use tokenizer_lib::{
 };
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEq, Eq, get_field_by_type::GetFieldByType)]
+#[derive(Debug, Clone, PartialEq, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub struct ClassDeclaration<T: ExpressionOrStatementPosition> {
 	pub name: T,
@@ -31,7 +31,7 @@ pub struct ClassDeclaration<T: ExpressionOrStatementPosition> {
 	pub position: Span,
 }
 
-impl<U: ExpressionOrStatementPosition + Debug + PartialEq + Eq + Clone + 'static> ASTNode
+impl<U: ExpressionOrStatementPosition + Debug + PartialEq + Clone + 'static> ASTNode
 	for ClassDeclaration<U>
 {
 	fn from_reader(
@@ -78,7 +78,7 @@ impl<U: ExpressionOrStatementPosition> ClassDeclaration<U> {
 			.is_some()
 			.then(|| {
 				crate::parse_bracketed(reader, state, options, None, TSXToken::CloseChevron)
-					.map(|(params, _)| params)
+					.map(|(params, _, _)| params)
 			})
 			.transpose()?;
 

@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![allow(clippy::new_without_default, clippy::too_many_lines)]
+#![warn(clippy::must_use_candidate)]
 
 mod block;
 mod comments;
@@ -122,6 +123,12 @@ pub struct ParseOptions {
 	pub record_keyword_positions: bool,
 	/// For the generator
 	pub interpolation_points: bool,
+	/// Extra
+	pub destructuring_type_annotation: bool,
+	/// Extra
+	pub extra_operators: bool,
+	/// For formatting
+	pub retain_blank_lines: bool,
 	/// For LSP
 	pub partial_syntax: bool,
 }
@@ -152,6 +159,9 @@ impl ParseOptions {
 			// Only used in the AST-generator
 			interpolation_points: false,
 			partial_syntax: true,
+			destructuring_type_annotation: true,
+			extra_operators: true,
+			retain_blank_lines: true,
 		}
 	}
 }
@@ -173,6 +183,9 @@ impl Default for ParseOptions {
 			record_keyword_positions: false,
 			interpolation_points: false,
 			partial_syntax: false,
+			destructuring_type_annotation: false,
+			extra_operators: false,
+			retain_blank_lines: false,
 		}
 	}
 }
@@ -279,16 +292,35 @@ pub enum Comments {
 pub struct LocalToStringInformation {
 	under: SourceId,
 	depth: u8,
+	should_try_pretty_print: bool,
 }
 
 impl LocalToStringInformation {
-	pub(crate) fn next_level(self) -> LocalToStringInformation {
-		LocalToStringInformation { under: self.under, depth: self.depth + 1 }
+	#[must_use]
+	pub fn new_under(under: SourceId) -> Self {
+		Self { under, depth: 0, should_try_pretty_print: true }
 	}
 
-	/// TODO for bundling
-	pub(crate) fn _change_source(self, new: SourceId) -> LocalToStringInformation {
-		LocalToStringInformation { under: new, depth: self.depth }
+	pub(crate) fn next_level(self) -> Self {
+		Self {
+			under: self.under,
+			depth: self.depth + 1,
+			should_try_pretty_print: self.should_try_pretty_print,
+		}
+	}
+
+	/// For printing source maps after bundling
+	pub(crate) fn change_source(self, new: SourceId) -> Self {
+		Self {
+			under: new,
+			depth: self.depth,
+			should_try_pretty_print: self.should_try_pretty_print,
+		}
+	}
+
+	/// Prevents recursion & other excess
+	pub(crate) fn do_not_pretty_print(self) -> Self {
+		Self { under: self.under, depth: self.depth, should_try_pretty_print: false }
 	}
 }
 
@@ -317,7 +349,7 @@ pub trait ASTNode: Sized + Clone + PartialEq + std::fmt::Debug + Sync + Send + '
 	fn from_reader(
 		reader: &mut impl TokenReader<TSXToken, crate::TokenStart>,
 		state: &mut crate::ParsingState,
-		options: &ParseOptions,
+		options: &crate::ParseOptions,
 	) -> ParseResult<Self>;
 
 	fn to_string_from_buffer<T: source_map::ToString>(
@@ -330,11 +362,8 @@ pub trait ASTNode: Sized + Clone + PartialEq + std::fmt::Debug + Sync + Send + '
 	/// Returns structure as valid string
 	fn to_string(&self, options: &crate::ToStringOptions) -> String {
 		let mut buf = source_map::StringWithOptionalSourceMap::new(false);
-		self.to_string_from_buffer(
-			&mut buf,
-			options,
-			LocalToStringInformation { under: source_map::Nullable::NULL, depth: 0 },
-		);
+		let local = LocalToStringInformation::new_under(source_map::Nullable::NULL);
+		self.to_string_from_buffer(&mut buf, options, local);
 		buf.source
 	}
 }
@@ -350,7 +379,10 @@ pub fn lex_and_parse_script<T: ASTNode>(
 	let (mut sender, mut reader) =
 		tokenizer_lib::ParallelTokenQueue::new_with_buffer_size(options.buffer_size);
 	let lex_options = options.get_lex_options();
+
+	#[allow(clippy::cast_possible_truncation)]
 	let length_of_source = script.len() as u32;
+
 	let mut thread = std::thread::Builder::new().name("AST parsing".into());
 	if let Some(stack_size) = options.stack_size {
 		thread = thread.stack_size(stack_size);
@@ -481,7 +513,7 @@ impl ParsingState {
 	fn new_partial_point_marker<T>(&mut self, at: source_map::Start) -> Marker<T> {
 		let id = self.partial_points.len();
 		self.partial_points.push(at);
-		Marker(id as u8, Default::default())
+		Marker(u8::try_from(id).expect("more than 256 markers"), Default::default())
 	}
 }
 
@@ -491,6 +523,7 @@ pub struct KeywordPositions(Vec<(u32, TSXKeyword)>);
 
 impl KeywordPositions {
 	#[must_use]
+	#[allow(clippy::cast_possible_truncation)]
 	pub fn try_get_keyword_at_position(&self, pos: u32) -> Option<TSXKeyword> {
 		// binary search
 		let mut l: u32 = 0;
@@ -587,7 +620,10 @@ impl TryFrom<NumberRepresentation> for f64 {
 			NumberRepresentation::Number(value) => Ok(value),
 			NumberRepresentation::Hex { sign, value, .. }
 			| NumberRepresentation::Bin { sign, value, .. }
-			| NumberRepresentation::Octal { sign, value, .. } => Ok(sign.apply(value as f64)),
+			| NumberRepresentation::Octal { sign, value, .. } => {
+				// TODO `value as f64` can lose information? If so should return f64::INFINITY
+				Ok(sign.apply(value as f64))
+			}
 			NumberRepresentation::Exponential { sign, value, exponent } => {
 				Ok(sign.apply(value * 10f64.powi(exponent)))
 			}
@@ -763,8 +799,12 @@ impl std::ops::Neg for NumberRepresentation {
 				NumberRepresentation::Octal { sign: sign.neg(), value }
 			}
 			NumberRepresentation::Number(n) => NumberRepresentation::Number(n.neg()),
-			NumberRepresentation::Exponential { .. } => todo!(),
-			NumberRepresentation::BigInt(_, _) => todo!(),
+			NumberRepresentation::Exponential { sign, value, exponent } => {
+				NumberRepresentation::Exponential { sign: sign.neg(), value, exponent }
+			}
+			NumberRepresentation::BigInt(sign, value) => {
+				NumberRepresentation::BigInt(sign.neg(), value)
+			}
 		}
 	}
 }
@@ -797,7 +837,7 @@ impl NumberRepresentation {
 /// Classes and `function` functions have two variants depending whether in statement position
 /// or expression position
 pub trait ExpressionOrStatementPosition:
-	Clone + std::fmt::Debug + Sync + Send + PartialEq + Eq + 'static
+	Clone + std::fmt::Debug + Sync + Send + PartialEq + 'static
 {
 	type FunctionBody: ASTNode;
 
@@ -824,7 +864,7 @@ pub trait ExpressionOrStatementPosition:
 	fn is_declare(&self) -> bool;
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 #[apply(derive_ASTNode)]
 pub struct StatementPosition {
 	pub identifier: VariableIdentifier,
@@ -860,7 +900,7 @@ impl ExpressionOrStatementPosition for StatementPosition {
 	}
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 #[apply(derive_ASTNode)]
 pub struct ExpressionPosition(pub Option<VariableIdentifier>);
 
@@ -904,10 +944,17 @@ impl ExpressionOrStatementPosition for ExpressionPosition {
 }
 
 pub trait ListItem: Sized {
+	type LAST;
+	const LAST_PREFIX: Option<TSXToken> = None;
 	const EMPTY: Option<Self> = None;
 
-	fn allow_comma_after(&self) -> bool {
-		true
+	#[allow(unused)]
+	fn parse_last_item(
+		reader: &mut impl TokenReader<TSXToken, crate::TokenStart>,
+		state: &mut crate::ParsingState,
+		options: &ParseOptions,
+	) -> ParseResult<Self::LAST> {
+		unreachable!("ListItem::LAST != ASTNode")
 	}
 }
 
@@ -920,7 +967,7 @@ pub(crate) fn parse_bracketed<T: ASTNode + ListItem>(
 	options: &ParseOptions,
 	start: Option<TSXToken>,
 	end: TSXToken,
-) -> ParseResult<(Vec<T>, TokenEnd)> {
+) -> ParseResult<(Vec<T>, Option<T::LAST>, TokenEnd)> {
 	if let Some(start) = start {
 		let _ = reader.expect_next(start)?;
 	}
@@ -934,31 +981,31 @@ pub(crate) fn parse_bracketed<T: ASTNode + ListItem>(
 				}
 				let Token(token, s) = reader.next().unwrap();
 				if token == end {
-					return Ok((nodes, s.get_end_after(token.length() as usize)));
+					return Ok((nodes, None, s.get_end_after(token.length() as usize)));
 				}
 				continue;
 			}
 		} else if let Some(token) = reader.conditional_next(|token| *token == end) {
-			return Ok((nodes, token.get_end()));
+			return Ok((nodes, None, token.get_end()));
+		}
+
+		if T::LAST_PREFIX.is_some_and(|l| reader.peek().is_some_and(|Token(token, _)| *token == l))
+		{
+			let last = T::parse_last_item(reader, state, options)?;
+			let len = end.length() as usize;
+			let end = reader.expect_next(end)?.get_end_after(len);
+			return Ok((nodes, Some(last), end));
 		}
 
 		let node = T::from_reader(reader, state, options)?;
-		let allow_comma = T::allow_comma_after(&node);
 		nodes.push(node);
 
 		match reader.next().ok_or_else(errors::parse_lexing_error)? {
-			Token(TSXToken::Comma, s) => {
-				if !allow_comma {
-					return Err(ParseError::new(
-						crate::ParseErrors::TrailingCommaNotAllowedHere,
-						s.with_length(1),
-					));
-				}
-			}
+			Token(TSXToken::Comma, _) => {}
 			token => {
 				if token.0 == end {
 					let get_end = token.get_end();
-					return Ok((nodes, get_end));
+					return Ok((nodes, None, get_end));
 				}
 				let position = token.get_span();
 				return Err(ParseError::new(
@@ -1031,42 +1078,91 @@ fn receiver_to_tokens(
 /// *`to_strings`* items surrounded in `{`, `[`, `(`, etc. Defaults to `,` as delimiter
 pub(crate) fn to_string_bracketed<T: source_map::ToString, U: ASTNode>(
 	nodes: &[U],
-	brackets: (char, char),
+	(left_bracket, right_bracket): (char, char),
 	buf: &mut T,
 	options: &crate::ToStringOptions,
 	local: crate::LocalToStringInformation,
 ) {
-	buf.push(brackets.0);
+	const MAX_INLINE_OBJECT_LITERAL: u32 = 40;
+	let large =
+		are_nodes_over_length(nodes.iter(), options, local, Some(MAX_INLINE_OBJECT_LITERAL), true);
+
+	buf.push(left_bracket);
+	let inner_local = if large {
+		local.next_level()
+	} else {
+		if left_bracket == '{' {
+			options.push_gap_optionally(buf);
+		}
+		local
+	};
 	for (at_end, node) in nodes.iter().endiate() {
-		node.to_string_from_buffer(buf, options, local);
+		if large {
+			buf.push_new_line();
+			options.add_indent(inner_local.depth, buf);
+		}
+		node.to_string_from_buffer(buf, options, inner_local);
 		if !at_end {
 			buf.push(',');
 			options.push_gap_optionally(buf);
 		}
 	}
-	buf.push(brackets.1);
+	if large {
+		buf.push_new_line();
+		options.add_indent(local.depth, buf);
+	} else if left_bracket == '{' {
+		options.push_gap_optionally(buf);
+	}
+	buf.push(right_bracket);
 }
 
 /// Part of [ASI](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Lexical_grammar#automatic_semicolon_insertion)
+///
+/// Also returns the line difference
 pub(crate) fn expect_semi_colon(
 	reader: &mut impl TokenReader<TSXToken, crate::TokenStart>,
 	line_starts: &source_map::LineStarts,
-	prev: u32,
-) -> ParseResult<()> {
+	statement_end: u32,
+	record_new_lines: bool,
+) -> ParseResult<usize> {
 	if let Some(token) = reader.peek() {
 		let Token(kind, start) = token;
-		// eprintln!("{:?} {:?} {:?}", prev, next, line_starts);
-		if let TSXToken::CloseBrace | TSXToken::EOS = kind {
-			Ok(())
-		} else if !matches!(kind, TSXToken::SemiColon)
-			&& line_starts.byte_indexes_on_different_lines(prev as usize, start.0 as usize)
+
+		if let TSXToken::CloseBrace
+		| TSXToken::EOS
+		| TSXToken::Comment(..)
+		| TSXToken::MultiLineComment(..) = kind
 		{
-			Ok(())
+			Ok(line_starts
+				.byte_indexes_crosses_lines(statement_end as usize, start.0 as usize + 1)
+				.saturating_sub(1))
+		} else if let TSXToken::SemiColon = kind {
+			let Token(_, semicolon_end) = reader.next().unwrap();
+			let Token(kind, next) = reader.peek().unwrap();
+			if record_new_lines {
+				let byte_indexes_crosses_lines = line_starts
+					.byte_indexes_crosses_lines(semicolon_end.0 as usize, next.0 as usize + 1);
+
+				// TODO WIP
+				if let TSXToken::EOS = kind {
+					Ok(byte_indexes_crosses_lines)
+				} else {
+					Ok(byte_indexes_crosses_lines.saturating_sub(1))
+				}
+			} else {
+				Ok(0)
+			}
 		} else {
-			reader.expect_next(TSXToken::SemiColon).map(|_| ()).map_err(Into::into)
+			let line_difference = line_starts
+				.byte_indexes_crosses_lines(statement_end as usize, start.0 as usize + 1);
+			if line_difference == 0 {
+				throw_unexpected_token(reader, &[TSXToken::SemiColon])
+			} else {
+				Ok(line_difference - 1)
+			}
 		}
 	} else {
-		Ok(())
+		Ok(0)
 	}
 }
 
@@ -1114,49 +1210,38 @@ impl VariableKeyword {
 ///
 /// Conditionally computes the node length
 /// Does nothing under pretty == false or no max line length
-pub fn is_node_over_length<T: ASTNode>(
-	e: &T,
+pub fn are_nodes_over_length<'a, T: ASTNode>(
+	nodes: impl ExactSizeIterator<Item = &'a T>,
 	options: &ToStringOptions,
 	local: crate::LocalToStringInformation,
 	// None = 'no space'
 	available_space: Option<u32>,
+	// Whether just to consider the amount on the line or the entire object
+	total: bool,
 ) -> bool {
-	use source_map::ToString;
-
-	if options.enforce_limit_length_limit() {
-		if available_space.is_none() {
-			return true;
-		}
+	if options.enforce_limit_length_limit() && local.should_try_pretty_print {
+		let room = available_space.map_or(options.max_line_length as usize, |s| s as usize);
 		let mut buf = source_map::StringWithOptionalSourceMap {
 			source: String::new(),
 			source_map: None,
-			quit_after: available_space.map(|s| s as usize),
-			since_new_line: 0,
+			quit_after: Some(room),
+			// Temp fix for considering delimiters to nodes
+			since_new_line: nodes.len().try_into().expect("4 billion nodes ?"),
 		};
-		e.to_string_from_buffer(&mut buf, options, local);
 
-		// If is halted, then went over
-		buf.should_halt()
+		for node in nodes {
+			node.to_string_from_buffer(&mut buf, options, local);
+
+			let length = if total { buf.source.len() } else { buf.since_new_line as usize };
+			let is_over = length > room;
+			if is_over {
+				return is_over;
+			}
+		}
+		false
 	} else {
 		false
 	}
-}
-
-fn get_length_of_node<T: ASTNode>(
-	e: &T,
-	options: &ToStringOptions,
-	local: LocalToStringInformation,
-	available_space: i32,
-) -> u16 {
-	// TODO swap under "release" mode
-	let mut buf = source_map::StringWithOptionalSourceMap {
-		source: String::new(),
-		source_map: None,
-		quit_after: Some(available_space as usize),
-		since_new_line: 0,
-	};
-	e.to_string_from_buffer(&mut buf, options, local);
-	buf.source.len() as u16
 }
 
 /// Re-exports or generator and general use

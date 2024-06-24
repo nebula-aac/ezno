@@ -7,7 +7,7 @@ use crate::{
 
 /// e.g. `type NumberArray = Array<number>`
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEq, Eq, get_field_by_type::GetFieldByType)]
+#[derive(Debug, Clone, PartialEq, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub struct TypeAlias {
 	pub name: StatementPosition,
@@ -29,7 +29,7 @@ impl ASTNode for TypeAlias {
 			.is_some()
 			.then(|| {
 				crate::parse_bracketed(reader, state, options, None, TSXToken::CloseChevron)
-					.map(|(params, _)| params)
+					.map(|(params, _, _)| params)
 			})
 			.transpose()?;
 

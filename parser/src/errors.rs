@@ -29,6 +29,112 @@ pub enum ParseErrors<'a> {
 	CannotUseLeadingParameterHere,
 	ExpectedIdentifier,
 	ExpectedNumberLiteral,
+	NonStandardSyntaxUsedWithoutEnabled,
+	ExpectRule,
+	InvalidRegexFlag,
+	ExpectedDeclaration,
+	CannotHaveRegularMemberAfterSpread,
+}
+
+impl<'a> Display for ParseErrors<'a> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match self {
+			ParseErrors::UnexpectedToken { expected, found } => {
+				f.write_str("Expected ")?;
+				match expected {
+					[] => unreachable!("no expected tokens given"),
+					[a] => f.write_fmt(format_args!("{a:?}")),
+					[a, b] => f.write_fmt(format_args!("{a:?} or {b:?}")),
+					[head @ .., end] => {
+						let start = head
+							.iter()
+							.map(|token| format!("{token:?}"))
+							.reduce(|mut acc, token| {
+								acc.push_str(", ");
+								acc.push_str(&token);
+								acc
+							})
+							.unwrap();
+						f.write_fmt(format_args!("{start} or {end:?}"))
+					}
+				}?;
+				write!(f, " found {found:?}")
+			}
+			ParseErrors::UnexpectedSymbol(invalid_character) => Display::fmt(invalid_character, f),
+			ParseErrors::ClosingTagDoesNotMatch { expected, found } => {
+				write!(f, "Expected </{expected}> found </{found}>")
+			}
+			ParseErrors::NonStandardSyntaxUsedWithoutEnabled => {
+				write!(f, "Cannot use this syntax without flag enabled")
+			}
+			ParseErrors::ExpectedStringLiteral { found } => {
+				write!(f, "Expected string literal, found {found:?}")
+			}
+			ParseErrors::TypeArgumentsNotValidOnReference => {
+				write!(f, "Type arguments not valid on reference",)
+			}
+			ParseErrors::UnmatchedBrackets => f.write_str("Unmatched brackets"),
+			ParseErrors::FunctionParameterOptionalAndDefaultValue => {
+				f.write_str("Function parameter cannot be optional *and* have default expression")
+			}
+			ParseErrors::ExpectedIdent { found, at_location } => {
+				write!(f, "Expected identifier at {at_location}, found {found:?}")
+			}
+			ParseErrors::ParameterCannotHaveDefaultValueHere => {
+				f.write_str("Function parameter cannot be have default value here")
+			}
+			ParseErrors::InvalidLHSAssignment => f.write_str("Invalid syntax on LHS of assignment"),
+			ParseErrors::ExpectedCatchOrFinally => {
+				f.write_str("Expected 'catch' or 'finally' to follow 'try'")
+			}
+			ParseErrors::LexingFailed => {
+				// unreachable!("This should never be written"),
+				f.write_str("Lexing issue")
+			}
+			ParseErrors::InvalidDeclareItem(item) => {
+				write!(f, "Declare item '{item}' must be in .d.ts file")
+			}
+			ParseErrors::DestructuringRequiresValue => {
+				write!(f, "RHS of destructured declaration requires expression")
+			}
+			ParseErrors::CannotAccessObjectLiteralDirectly => {
+				write!(f, "Cannot get property on object literal directly")
+			}
+			ParseErrors::TrailingCommaNotAllowedHere => {
+				write!(f, "Trailing comma not allowed here")
+			}
+			ParseErrors::InvalidNumberLiteral => {
+				write!(f, "Invalid number literal")
+			}
+			ParseErrors::ReservedIdentifier => {
+				write!(f, "Found reserved identifier")
+			}
+			ParseErrors::AwaitRequiresForOf => {
+				write!(f, "Can only use await on for (.. of ..)")
+			}
+			ParseErrors::CannotUseLeadingParameterHere => {
+				write!(f, "Cannot write this constraint in this kind of function")
+			}
+			ParseErrors::ExpectedIdentifier => {
+				write!(f, "Expected variable identifier")
+			}
+			ParseErrors::ExpectedNumberLiteral => {
+				write!(f, "Expected number literal")
+			}
+			ParseErrors::ExpectRule => {
+				write!(f, "'-' must be followed by a readonly rule")
+			}
+			ParseErrors::InvalidRegexFlag => {
+				write!(f, "Regexp flags must be 'd', 'g', 'i', 'm', 's', 'u' or 'y'")
+			}
+			ParseErrors::ExpectedDeclaration => {
+				write!(f, "Expected identifier after variable declaration keyword")
+			}
+			ParseErrors::CannotHaveRegularMemberAfterSpread => {
+				write!(f, "Cannot have regular member after spread")
+			}
+		}
+	}
 }
 
 #[allow(missing_docs)]
@@ -104,92 +210,6 @@ impl Display for LexingErrors {
 			}
 			LexingErrors::ExpectedDashInComment => {
 				f.write_str("JSX comments must have two dashes after `<!` start")
-			}
-		}
-	}
-}
-
-impl<'a> Display for ParseErrors<'a> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			ParseErrors::UnexpectedToken { expected, found } => {
-				f.write_str("Expected ")?;
-				match expected {
-					[] => unreachable!("no expected tokens given"),
-					[a] => f.write_fmt(format_args!("{a:?}")),
-					[a, b] => f.write_fmt(format_args!("{a:?} or {b:?}")),
-					[head @ .., end] => {
-						let start = head
-							.iter()
-							.map(|token| format!("{token:?}"))
-							.reduce(|mut acc, token| {
-								acc.push_str(", ");
-								acc.push_str(&token);
-								acc
-							})
-							.unwrap();
-						f.write_fmt(format_args!("{start} or {end:?}"))
-					}
-				}?;
-				write!(f, " found {found:?}")
-			}
-			ParseErrors::UnexpectedSymbol(invalid_character) => Display::fmt(invalid_character, f),
-			ParseErrors::ClosingTagDoesNotMatch { expected, found } => {
-				write!(f, "Expected </{expected}> found </{found}>")
-			}
-			ParseErrors::ExpectedStringLiteral { found } => {
-				write!(f, "Expected string literal, found {found:?}")
-			}
-			ParseErrors::TypeArgumentsNotValidOnReference => {
-				write!(f, "Type arguments not valid on reference",)
-			}
-			ParseErrors::UnmatchedBrackets => f.write_str("Unmatched brackets"),
-			ParseErrors::FunctionParameterOptionalAndDefaultValue => {
-				f.write_str("Function parameter cannot be optional *and* have default expression")
-			}
-			ParseErrors::ExpectedIdent { found, at_location } => {
-				write!(f, "Expected identifier at {at_location}, found {found:?}")
-			}
-			ParseErrors::ParameterCannotHaveDefaultValueHere => {
-				f.write_str("Function parameter cannot be have default value here")
-			}
-			ParseErrors::InvalidLHSAssignment => f.write_str("Invalid syntax on LHS of assignment"),
-			ParseErrors::ExpectedCatchOrFinally => {
-				f.write_str("Expected 'catch' or 'finally' to follow 'try'")
-			}
-			ParseErrors::LexingFailed => {
-				// unreachable!("This should never be written"),
-				f.write_str("Lexing issue")
-			}
-			ParseErrors::InvalidDeclareItem(item) => {
-				write!(f, "Declare item '{item}' must be in .d.ts file")
-			}
-			ParseErrors::DestructuringRequiresValue => {
-				write!(f, "RHS of destructured declaration requires expression")
-			}
-			ParseErrors::CannotAccessObjectLiteralDirectly => {
-				write!(f, "Cannot get property on object literal directly")
-			}
-			ParseErrors::TrailingCommaNotAllowedHere => {
-				write!(f, "Trailing comma not allowed here")
-			}
-			ParseErrors::InvalidNumberLiteral => {
-				write!(f, "Invalid number literal")
-			}
-			ParseErrors::ReservedIdentifier => {
-				write!(f, "Found reserved identifier")
-			}
-			ParseErrors::AwaitRequiresForOf => {
-				write!(f, "Can only use await on for (.. of ..)")
-			}
-			ParseErrors::CannotUseLeadingParameterHere => {
-				write!(f, "Cannot write this constraint in this kind of function")
-			}
-			ParseErrors::ExpectedIdentifier => {
-				write!(f, "Expected variable identifier")
-			}
-			ParseErrors::ExpectedNumberLiteral => {
-				write!(f, "Expected number literal")
 			}
 		}
 	}

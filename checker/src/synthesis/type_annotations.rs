@@ -20,26 +20,27 @@
 
 use std::convert::TryInto;
 
-use map_vec::Map;
+use crate::{
+	synthesis::assignments::synthesise_access_to_reference, types::generics::ExplicitTypeArguments,
+	Map,
+};
 use parser::{
-	type_annotations::{
-		AnnotationWithBinder, CommonTypes, TupleElementKind, TypeCondition, TypeConditionResult,
-	},
+	type_annotations::{AnnotationWithBinder, CommonTypes, TupleElementKind, TupleLiteralElement},
 	ASTNode, TypeAnnotation,
 };
 use source_map::SpanWithSource;
 
 use crate::{
-	context::information::Publicity,
 	diagnostics::{TypeCheckError, TypeCheckWarning, TypeStringRepresentation},
-	features::{objects::ObjectBuilder, template_literal::synthesize_template_literal_type},
+	features::objects::ObjectBuilder,
 	synthesis::functions::synthesise_function_annotation,
+	types::properties::Publicity,
 	types::{
-		generics::generic_type_arguments::StructureGenericArguments,
+		generics::generic_type_arguments::GenericArguments,
 		properties::{PropertyKey, PropertyValue},
-		Constant, Constructor, StructureGenerics, Type, TypeId,
+		Constant, Constructor, PartiallyAppliedGenerics, Type, TypeId,
 	},
-	CheckingData, Environment,
+	CheckingData, Environment, Scope,
 };
 
 /// Turns a [`parser::TypeAnnotation`] into [`TypeId`]
@@ -76,7 +77,9 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 			checking_data.types.new_constant_type(Constant::Boolean(*value))
 		}
 		TypeAnnotation::Name(name, pos) => match name.as_str() {
-			"any" => TypeId::ANY_TYPE,
+			// TODO differentiate? see #137
+			"any" | "unknown" => TypeId::ANY_TYPE,
+			"never" => TypeId::NEVER_TYPE,
 			"this" => todo!(), // environment.get_value_of_this(&mut checking_data.types),
 			"self" => TypeId::ANY_INFERRED_FREE_THIS,
 			name => {
@@ -187,8 +190,8 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 					None
 				};
 
-				let mut type_arguments: map_vec::Map<TypeId, (TypeId, SpanWithSource)> =
-					map_vec::Map::new();
+				let mut type_arguments: crate::Map<TypeId, (TypeId, SpanWithSource)> =
+					crate::Map::default();
 
 				for (parameter, argument_type_annotation) in
 					parameters.clone().into_iter().zip(arguments.iter())
@@ -258,19 +261,20 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 				}
 
 				// Eagerly specialise for type alias. TODO don't do for object types...
-				let mut arguments = StructureGenericArguments::ExplicitRestrictions(type_arguments);
 				if let Some(on) = is_flattenable_alias {
 					crate::types::substitute(
 						on,
-						&mut arguments,
+						&ExplicitTypeArguments(type_arguments).into_substitution_arguments(),
 						environment,
 						&mut checking_data.types,
 					)
 				} else {
-					let ty = Type::Constructor(Constructor::StructureGenerics(StructureGenerics {
+					let arguments = GenericArguments::ExplicitRestrictions(type_arguments);
+
+					let ty = Type::PartiallyAppliedGenerics(PartiallyAppliedGenerics {
 						on: inner_type_id,
 						arguments,
-					}));
+					});
 
 					checking_data.types.register_type(ty)
 				}
@@ -318,23 +322,14 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 				TypeId::T_TYPE,
 				(underlying_type, pos.with_source(environment.get_source())),
 			)]);
-			let ty = Type::Constructor(Constructor::StructureGenerics(StructureGenerics {
+			let ty = Type::PartiallyAppliedGenerics(PartiallyAppliedGenerics {
 				on: TypeId::READONLY_RESTRICTION,
-				arguments: StructureGenericArguments::ExplicitRestrictions(restrictions),
-			}));
+				arguments: GenericArguments::ExplicitRestrictions(restrictions),
+			});
 
 			checking_data.types.register_type(ty)
 
-			// let ty_to_be_readonly = checking_data.types.register_type(Type::AliasTo {
-			// 	to: underlying_type,
-			// 	name: None,
-			// 	parameters: None,
-			// });
-
-			// // TODO I think Readonly == freeze...?
 			// environment.frozen.insert(ty_to_be_readonly, TypeId::TRUE);
-
-			// ty_to_be_readonly)
 		}
 		TypeAnnotation::NamespacedName(_, _, _) => unimplemented!(),
 		TypeAnnotation::ArrayLiteral(item_annotation, _) => {
@@ -346,8 +341,14 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 			type_parameters: _,
 			parameters: _,
 			return_type: _,
-			position: _,
-		} => unimplemented!(),
+			position,
+		} => {
+			checking_data.raise_unimplemented_error(
+				"constructor literal",
+				position.with_source(environment.get_source()),
+			);
+			TypeId::ERROR_TYPE
+		}
 		// Object literals are first turned into types as if they were interface declarations and then
 		// returns reference to object literal
 		TypeAnnotation::ObjectLiteral(members, _) => {
@@ -366,15 +367,16 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 			)
 			.0
 		}
-		TypeAnnotation::TupleLiteral(members, _) => {
+		TypeAnnotation::TupleLiteral(members, position) => {
 			// TODO maybe should be special type
 			let mut obj = ObjectBuilder::new(
 				Some(TypeId::ARRAY_TYPE),
 				&mut checking_data.types,
+				position.with_source(environment.get_source()),
 				&mut environment.info,
 			);
 
-			for (idx, (spread, member)) in members.iter().enumerate() {
+			for (idx, TupleLiteralElement(spread, member, _)) in members.iter().enumerate() {
 				// TODO binder name under data...?
 				match spread {
 					TupleElementKind::Standard => {
@@ -394,7 +396,7 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 							Publicity::Public,
 							PropertyKey::from_usize(idx),
 							PropertyValue::Value(item_ty),
-							Some(ty_position),
+							ty_position,
 						);
 					}
 					TupleElementKind::Optional => {
@@ -415,9 +417,10 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 				Publicity::Public,
 				PropertyKey::String("length".into()),
 				PropertyValue::Value(length_value),
-				None,
+				annotation.get_position().with_source(environment.get_source()),
 			);
 
+			// TODO this should be anonymous object type
 			obj.build_object()
 		}
 		TypeAnnotation::ParenthesizedReference(ref reference, _) => {
@@ -430,27 +433,53 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 
 			checking_data.types.new_property_on_type_annotation(being_indexed, indexer, environment)
 		}
-		TypeAnnotation::KeyOf(_, _) => unimplemented!(),
-		TypeAnnotation::Conditional { condition, resolve_true, resolve_false, position: _ } => {
-			fn synthesise_condition(result: &TypeConditionResult) -> &TypeAnnotation {
-				match result {
-					TypeConditionResult::Reference(reference) => reference,
-					TypeConditionResult::Infer(_infer, _) => todo!(),
-				}
+		TypeAnnotation::KeyOf(of, _position) => {
+			let of = synthesise_type_annotation(of, environment, checking_data);
+			checking_data.types.new_key_of(of)
+		}
+		TypeAnnotation::TypeOf(item, position) => {
+			let reference = synthesise_access_to_reference(item, environment, checking_data);
+			if let Some(value) = environment.get_reference_constraint(reference) {
+				value
+			} else {
+				checking_data.raise_unimplemented_error(
+					"throw error for annotation",
+					position.with_source(environment.get_source()),
+				);
+				TypeId::ERROR_TYPE
 			}
+		}
+		TypeAnnotation::Conditional { condition, resolve_true, resolve_false, position: _ } => {
+			let (condition, infer_types) = {
+				let mut environment =
+					environment.new_lexical_environment(Scope::TypeAnnotationCondition {
+						infer_parameters: Default::default(),
+					});
+				let condition =
+					synthesise_type_annotation(condition, &mut environment, checking_data);
+				let Scope::TypeAnnotationCondition { infer_parameters } =
+					environment.context_type.scope
+				else {
+					unreachable!()
+				};
+				(condition, infer_parameters)
+			};
 
-			let condition = synthesise_type_condition(condition, environment, checking_data);
+			let truthy_result = {
+				if infer_types.is_empty() {
+					synthesise_type_annotation(resolve_true, environment, checking_data)
+				} else {
+					let mut environment =
+						environment.new_lexical_environment(Scope::TypeAnnotationConditionResult);
+					environment.named_types.extend(infer_types);
+					synthesise_type_annotation(resolve_true, &mut environment, checking_data)
+				}
+			};
 
-			let truthy_result = synthesise_type_annotation(
-				synthesise_condition(resolve_true),
-				environment,
-				checking_data,
-			);
-			let otherwise_result = synthesise_type_annotation(
-				synthesise_condition(resolve_false),
-				environment,
-				checking_data,
-			);
+			let otherwise_result =
+				synthesise_type_annotation(resolve_false, environment, checking_data);
+
+			// TODO might want to record whether infer_types is_empty here
 
 			let ty = Type::Constructor(Constructor::ConditionalResult {
 				condition,
@@ -471,51 +500,126 @@ pub(super) fn synthesise_type_annotation<T: crate::ReadFromFS>(
 			synthesise_type_annotation(inner, environment, checking_data)
 		}
 		TypeAnnotation::TemplateLiteral(parts, _) => {
-			let parts = parts
-				.iter()
-				.map(|part| match part {
-					parser::ast::TemplateLiteralPart::Static(s) => {
-						checking_data.types.new_constant_type(Constant::String(s.clone()))
-					}
-					parser::ast::TemplateLiteralPart::Dynamic(p) => {
-						let annotation = match &**p {
-							AnnotationWithBinder::Annotated { ty, .. }
-							| AnnotationWithBinder::NoAnnotation(ty) => ty,
-						};
-						synthesise_type_annotation(annotation, environment, checking_data)
-					}
-				})
-				.collect();
-
-			synthesize_template_literal_type(parts, &mut checking_data.types)
+			let mut iter = parts.iter();
+			let mut acc = part_to_type(iter.next().unwrap(), checking_data, environment);
+			// Using the existing thing breaks because we try to do `"..." + string` and
+			// the evaluate_mathematical_operator expects literal or poly values (not just types)
+			// TODO abstract to features/template_literal.rs
+			for part in iter {
+				let next = part_to_type(part, checking_data, environment);
+				let ty = if let (
+					Type::Constant(Constant::String(left)),
+					Type::Constant(Constant::String(right)),
+				) = (
+					checking_data.types.get_type_by_id(acc),
+					checking_data.types.get_type_by_id(next),
+				) {
+					Type::Constant(Constant::String(format!("{left}{right}")))
+				} else {
+					Type::Constructor(Constructor::BinaryOperator {
+						lhs: acc,
+						operator: crate::features::operations::MathematicalAndBitwise::Add,
+						rhs: next,
+					})
+				};
+				acc = checking_data.types.register_type(ty);
+			}
+			acc
 		}
-		TypeAnnotation::Symbol { .. } => todo!(),
+		TypeAnnotation::Infer { name, extends, position: _ } => {
+			if extends.is_some() {
+				crate::utilities::notify!("TODO");
+			}
+			if let Scope::TypeAnnotationCondition { ref mut infer_parameters } =
+				environment.context_type.scope
+			{
+				let infer_type = checking_data.types.register_type(Type::RootPolyType(
+					crate::types::PolyNature::InferGeneric { name: name.clone() },
+				));
+
+				let existing = infer_parameters.insert(name.clone(), infer_type);
+				if existing.is_some() {
+					crate::utilities::notify!("Raise error diagnostic");
+				}
+				infer_type
+			} else {
+				crate::utilities::notify!("Raise error diagnostic");
+				TypeId::ERROR_TYPE
+			}
+		}
+		TypeAnnotation::Extends { item, extends, position: _ } => {
+			let item = synthesise_type_annotation(item, environment, checking_data);
+			let extends = synthesise_type_annotation(extends, environment, checking_data);
+			let ty = Type::Constructor(Constructor::TypeRelationOperator(
+				crate::types::TypeRelationOperator::Extends { item, extends },
+			));
+			checking_data.types.register_type(ty)
+		}
+		TypeAnnotation::Is { item, is, position } => {
+			let _item = synthesise_type_annotation(item, environment, checking_data);
+			let _is = synthesise_type_annotation(is, environment, checking_data);
+			checking_data.raise_unimplemented_error(
+				"is type annotation",
+				position.with_source(environment.get_source()),
+			);
+			TypeId::ERROR_TYPE
+			// let ty = Type::Constructor(Constructor::TypeRelationOperator(
+			// 	crate::types::TypeRelationOperator::E { ty: item, is },
+			// ));
+			// checking_data.types.register_type(ty)
+		}
+		TypeAnnotation::Symbol { position, .. } => {
+			checking_data.raise_unimplemented_error(
+				"symbol annotation",
+				position.with_source(environment.get_source()),
+			);
+			TypeId::ERROR_TYPE
+		}
+		TypeAnnotation::Asserts(_, position) => {
+			// TODO construct condition for never
+			checking_data.raise_unimplemented_error(
+				"asserts annotation",
+				position.with_source(environment.get_source()),
+			);
+			TypeId::ERROR_TYPE
+		}
+		TypeAnnotation::This(position) => {
+			checking_data.raise_unimplemented_error(
+				"`this` annotation",
+				position.with_source(environment.get_source()),
+			);
+			TypeId::ERROR_TYPE
+		}
 	};
 
-	checking_data
-		.local_type_mappings
-		.types_to_types
-		.push(annotation.get_position().with_source(environment.get_source()), ty);
+	if checking_data.options.store_type_mappings {
+		checking_data
+			.local_type_mappings
+			.types_to_types
+			.push(annotation.get_position().with_source(environment.get_source()), ty);
+	}
 
 	ty
 }
 
-fn synthesise_type_condition<T: crate::ReadFromFS>(
-	condition: &TypeCondition,
-	environment: &mut Environment,
+fn part_to_type<T: crate::ReadFromFS>(
+	part: &parser::ast::TemplateLiteralPart<AnnotationWithBinder>,
 	checking_data: &mut CheckingData<T, super::EznoParser>,
+	environment: &mut crate::context::Context<crate::context::Syntax>,
 ) -> TypeId {
-	match condition {
-		TypeCondition::Extends { ty, extends, position: _ } => {
-			let item = synthesise_type_annotation(ty, environment, checking_data);
-			let extends = synthesise_type_annotation(extends, environment, checking_data);
-			let ty = Type::Constructor(Constructor::TypeRelationOperator(
-				crate::types::TypeRelationOperator::Extends { ty: item, extends },
-			));
-			checking_data.types.register_type(ty)
+	match part {
+		parser::ast::TemplateLiteralPart::Static(s) => {
+			checking_data.types.new_constant_type(Constant::String(s.clone()))
 		}
-		// TODO requires a kind of strict instance of ???
-		TypeCondition::Is { ty: _, is: _, position: _ } => todo!(),
+		parser::ast::TemplateLiteralPart::Dynamic(p) => {
+			let annotation = p.get_inner_ref();
+			let ty = synthesise_type_annotation(annotation, environment, checking_data);
+			if let Type::AliasTo { to, .. } = checking_data.types.get_type_by_id(ty) {
+				*to
+			} else {
+				ty
+			}
+		}
 	}
 }
 

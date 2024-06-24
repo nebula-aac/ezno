@@ -38,10 +38,10 @@ const b: string = a
 ```ts
 let a = 2
 a = "hello world"
-let b: boolean = a
+a satisfies number
 ```
 
-- Type "hello world" is not assignable to type boolean
+- Expected number, found "hello world"
 
 #### Variable references does not exist
 
@@ -138,22 +138,13 @@ let b: 3 = my_obj.a
 
 - Type 4 is not assignable to type 3
 
-#### Object property constraints
-
-```ts
-const my_obj: { a: number } = { a: 2 }
-my_obj.a = "hello world"
-```
-
-- Type "hello world" does not meet property constraint number
-
 #### Objects checks
 
 ```ts
-const my_obj: { b: 3 } = { a: 2 }
+const my_obj: { b: 3 } = { b: 4 }
 ```
 
-- Type { a: 2 } is not assignable to type { b: 3 }
+- Type { b: 4 } is not assignable to type { b: 3 }
 
 #### Getters
 
@@ -161,17 +152,90 @@ const my_obj: { b: 3 } = { a: 2 }
 let global = 0;
 const object = {
 	// This getter has an impure side effect
-	get getValue() {
+	get value() {
 		return ++global
 	},
 }
 
-object.getValue satisfies string
-object.getValue satisfies boolean
+object.value satisfies string
+object.value satisfies boolean
 ```
 
 - Expected string, found 1
 - Expected boolean, found 2
+
+#### Getter `this`
+
+```ts
+const object = {
+	x: 4,
+	get value(this: { x: number }) {
+		return this.x
+	},
+}
+
+object.value satisfies string
+```
+
+- Expected string, found 4
+
+#### Setter `this`
+
+```ts
+let a = 2;
+const obj = {
+	x: 5,
+	set value(v) {
+		this.x = v;
+	}
+}
+
+obj.value = "some value";
+obj.x satisfies 5;
+```
+
+- Expected 5, found "some value"
+
+#### Setter assignment type
+
+```ts
+const obj = {
+   set value(v: string) { }
+}
+
+obj.value = 5;
+```
+
+- Type 5 does not meet property constraint string
+
+#### Setter side effect
+
+```ts
+let a = 2;
+const obj = {
+	x: 5,
+	set value(v) {
+		a = v;
+	}
+}
+
+obj.value = "some value";
+a satisfies 2;
+```
+
+- Expected 2, found "some value"
+
+#### Setter return
+
+> Returns the RHS not the return type
+> TODO warning in the setter
+
+```ts
+const result = ({ set value(a) { return { a: 3 } }}).value = 5;
+result satisfies string;
+```
+
+- Expected string, found 5
 
 #### Object spread
 
@@ -210,6 +274,101 @@ const b = x.b;
 ```
 
 - No property 'b' on { a: 2 }
+
+#### `Object.keys`, `Object.values`, `Object.entries`
+
+```ts
+Object.keys({ a: 1, b: 2 }) satisfies ["a", "b"];
+Object.values({ a: 1, b: 2 }) satisfies [1, 2];
+Object.entries({ a: 1, b: 2 }) satisfies boolean;
+```
+
+- Expected boolean, found [["a", 1], ["b", 2]]
+
+#### Spread condition
+
+```ts
+declare let condition: boolean;
+
+const obj = {
+  foo: 1,
+  ...(condition ? {
+    bar: 2,
+    non_existent: 3,
+  } : {}),
+};
+
+obj.foo satisfies number;
+obj.bar satisfies string;
+```
+
+- Expected string, found 2 | undefined
+
+### Excess property
+
+> The following work through the same mechanism as forward inference
+> Thanks to pull request: #139
+
+#### Excess property at declaration
+
+```ts
+interface MyObject { property: string }
+
+const a: MyObject = { property: "hello", another: 2 }
+```
+
+- 'another' is not a property of MyObject
+
+#### Excess property at argument
+
+```ts
+interface MyObject { property: string }
+
+function process(param: MyObject) {}
+
+process({ property: "hello", another: 2 });
+```
+
+- 'another' is not a property of MyObject
+
+#### Excess property at return type
+
+```ts
+interface MyObject { property: string }
+
+function returnNewObject(): MyObject {
+	return { property: "hello", another: 67 }
+}
+```
+
+- 'another' is not a property of MyObject
+
+#### Excess property checks through spread and condition
+
+```ts
+type MyObject = { foo: number; bar?: number };
+
+const b: MyObject = {
+  foo: 1,
+  ...{
+    bar: 2,
+    invalid: 3,
+  },
+};
+
+declare let condition: boolean;
+
+const c: MyObject = {
+  foo: 1,
+  ...(condition ? {
+    bar: 2,
+    non_existent: 3,
+  } : {}),
+};
+```
+
+- 'invalid' is not a property of MyObject
+- 'non_existent' is not a property of MyObject
 
 ### Constant evaluation
 
@@ -535,6 +694,27 @@ getNumber2() satisfies 6;
 
 - Expected () => 4, found () => number
 
+#### Function hoisting
+
+> `getString` can be used and has a type before it has been synthesised
+> TODO actual calling before defined (this currently only works bc of free-variables)
+
+```ts
+function x() {
+    getString(3)
+}
+
+function y() {
+    getString("something") satisfies string;
+}
+
+function getString(param: string): string {
+    return "hi"
+}
+```
+
+- Argument of type 3 is not assignable to parameter of type string
+
 ### Function calling
 
 #### Argument type against parameter
@@ -689,7 +869,7 @@ toUpperCase();
 
 - The 'this' context of the function is expected to be string, found undefined
 
-#### Calling new on a function
+#### Calling `new` on a function
 
 ```ts
 function MyClass(value) {
@@ -700,6 +880,34 @@ new MyClass("hi").value satisfies "hello"
 ```
 
 - Expected "hello", found "hi"
+
+#### `new` on function prototype
+
+```ts
+function MyClass(value) {
+	this.value = value
+}
+
+MyClass.prototype.other = 2;
+
+const object = new MyClass("hi");
+object.value satisfies "hi";
+object.other satisfies "hello";
+```
+
+- Expected "hello", found 2
+
+#### Checking with function prototype
+
+```ts
+function MyClass(this: { other: string }) { }
+
+MyClass.prototype.other = 2;
+
+const m = new MyClass();
+```
+
+- The 'this' context of the function is expected to be { other: string }, found { other: 2 }
 
 #### Arguments in to rest parameter
 
@@ -795,6 +1003,29 @@ doThing(6, 1) satisfies 6;
 ```
 
 - Expected 2, found 5
+
+#### Canceled generics
+
+> aka remove generic arguments if they don't match the structure
+
+```ts
+declare function func<T>(prop: { a: number, b: T, c: string } | { a: number, b: string, c: T }): T;
+
+func({ a: 3, b: "hi", c: false }) satisfies string;
+```
+
+- Expected string, found false
+
+#### Template literal calling error
+
+```ts
+function myTag(static_parts: Array<string>, count: number) {
+}
+
+myTag`Count is ${"not a number!!"}`;
+```
+
+- Argument of type \"not a number!!\" is not assignable to parameter of type number (in template literal)
 
 ### Effects
 
@@ -1070,23 +1301,6 @@ a satisfies 3
 - Expected 2, found 0
 - Expected 3, found 1
 
-#### *Inconclusive* conditional update
-
-```ts
-declare var value: string;
-let a: string | number = 0;
-
-function conditional(v: string) {
-	if (v === "value") {
-		a = "hi"
-	}
-}
-conditional(value);
-a satisfies string;
-```
-
-- Expected string, found "hi" | 0
-
 #### If and else (across function)
 
 ```ts
@@ -1142,20 +1356,6 @@ b satisfies string;
 - Expected 3, found 4
 - Expression is always true
 - Expected string, found 5
-
-#### Conditional return type inference
-
-```ts
-function func(a: boolean) {
-	if (a) {
-		return 2
-	}
-}
-
-func satisfies (a: boolean) => 5;
-```
-
-- Expected (a: boolean) => 5, found (a: boolean) => 2 | undefined
 
 #### Unknown condition assignment
 
@@ -1282,7 +1482,7 @@ a satisfies string;
 ```ts
 function loop(n: number, c: string) {
 	let a: string = c;
-	let i: number = 0;
+	let i: number = 1;
 	while (i++ < n) {
 		a += c
 	}
@@ -1310,29 +1510,6 @@ a satisfies 2;
 ```
 
 - Expected 2, found 8
-
-#### Break with label
-
-```ts
-let a: number = 0;
-let result;
-
-top: while (a++ < 10) {
-	let b: number = 0;
-	while (b++ < 10) {
-		if (a === 3 && b === 2) {
-			result = a * b;
-			break top
-		}
-	}
-}
-
-a satisfies string;
-result satisfies boolean;
-```
-
-- Expected string, found 3
-- Expected boolean, found 6
 
 #### Continue in a while loop
 
@@ -1382,6 +1559,106 @@ properties satisfies boolean;
 
 - Expected boolean, found string
 
+### Exceptions and `try-catch-finally`
+
+#### Try-catch and throw
+
+```ts
+try {
+	throw 2
+} catch (err) {
+	err satisfies string
+}
+
+console.log("Error caught!")
+```
+
+- Expected string, found 2
+
+#### Throw effects carry through
+
+```ts
+function throwType(a) {
+	throw a
+}
+
+try {
+	throwType(3)
+} catch (err) {
+	err satisfies string
+}
+
+console.log("Error caught!")
+```
+
+- Expected string, found 3
+
+#### Catch annotation
+
+> Thanks to #131
+
+```ts
+try {
+	throw 3
+} catch (err: string) {
+    console.log(err)
+}
+
+console.log("Error caught!")
+```
+
+- Cannot catch type string because the try block throws 3
+
+#### Function effect
+
+```ts
+function exceptionToResult(cb: () => number) {
+    try {
+        return cb()
+    } catch (e) {
+        return e
+    }
+}
+
+exceptionToResult(() => 6) satisfies 6;
+exceptionToResult(() => { throw 12 }) satisfies 8;
+console.log("Error caught!")
+```
+
+- Expected 8, found 12
+
+#### Checked thrown type from callback
+
+```ts
+function exceptionToResult(cb: () => number) {
+    try {
+        cb()
+    } catch (e: number) {
+        return e
+    }
+}
+
+exceptionToResult(() => { throw "not a number" });
+console.log("Error caught!")
+```
+
+- Cannot throw "not a number" in block that expects number
+
+#### Internal function effect
+
+```ts
+function exceptionToResult(s: string) {
+    try {
+        return JSON.parse(s)
+    } catch (e: number) {
+        return e
+    }
+}
+console.log("Error caught!")
+```
+
+- Cannot catch type number because the try block throws SyntaxError
+
 ### Collections
 
 > Some of these are built of exiting features.
@@ -1429,19 +1706,6 @@ x.push("hi");
 ```
 
 - Expected [7, 8, 11], found [7, 9, 11]
-
-#### `find` and `includes`
-
-> TODO other arguments (index and `this`). and poly
-
-```ts
-[1, 2, 3].find(x => x % 2 === 0) satisfies 4;
-
-// [1, 2, 3].includes(6) satisfies string;
-```
-
-- Expected 4, found 2
-<!-- - Expected string, found false -->
 
 ### Statements, declarations and expressions
 
@@ -1697,48 +1961,6 @@ s satisfies number;
 - Expected string, found undefined
 - Expected number, found "hello"
 
-#### Try-catch and throw
-
-```ts
-try {
-	throw 2
-} catch (err) {
-	err satisfies string
-}
-```
-
-- Expected string, found 2
-
-#### Throw effects carry through
-
-```ts
-function throwType(a) {
-	throw a
-}
-
-try {
-	throwType(3)
-} catch (err) {
-	err satisfies string
-}
-```
-
-- Expected string, found 3
-
-#### Catch annotation
-
-> Thanks to #131
-
-```ts
-try {
-	throw 3
-} catch (err: string) {
-    console.log(err)
-}
-```
-
-- Cannot catch type string because the try block throws 3
-
 #### Object destructuring assignment
 
 > Added in #127
@@ -1761,6 +1983,36 @@ c satisfies 3;
 - Expected string, found 2
 - Expected boolean, found 3
 - Expected 3, found 1
+
+#### `import.meta`
+
+> Unfortunately because of bundling `url` and `resolve` cannot have known results so just `string`.
+
+```ts
+import.meta.url satisfies number;
+import.meta.resolve("./lib/helper.js") satisfies string;
+
+import.meta.env.production satisfies boolean;
+```
+
+- Expected number, found string
+- Expected boolean, found string | undefined
+
+#### `instanceof` operator
+
+> TODO dependent version
+
+```ts
+([] instanceof Array) satisfies true;
+({} instanceof Map) satisfies 4;
+
+class X {}
+
+(new X instanceof X) satisfies true;
+([] instanceof X) satisfies false;
+```
+
+- Expected 4, found false
 
 ### Async and `Promise`s
 
@@ -2001,6 +2253,44 @@ class Class extends BaseClass {
 
 - Expected string, found boolean
 
+#### `super` call
+
+```ts
+let b: number = 0;
+class Y {
+    constructor(a) {
+        this.a = a;
+        b++;
+    }
+}
+
+class X extends Y {
+    constructor(a) {
+        super(a);
+    }
+}
+
+const x = new X("hi");
+x.a satisfies "hello";
+b satisfies 1;
+```
+
+- Expected "hello", found "hi"
+
+#### Nominal-ness
+
+```ts
+class X { a: number = 2 }
+class Y { a: number = 2}
+
+function doThingWithX(x: X) {}
+
+doThingWithX(new X());
+doThingWithX(new Y())
+```
+
+- Argument of type [Y] { a: 2 } is not assignable to parameter of type X
+
 ### Types
 
 #### Non existent type
@@ -2074,12 +2364,12 @@ function getA<T extends { a: string }>(p: T) {
 	return p.a
 }
 
-getA({ p: 2 })
+getA({ a: 2 })
 ```
 
-- Argument of type { p: 2 } is not assignable to parameter of type T
+- Argument of type { a: 2 } is not assignable to parameter of type T
 
-> I think reasons contains more information
+> I think reasons contains more information for the T parameter
 
 #### Function parameter subtyping
 
@@ -2147,6 +2437,8 @@ function getOther<T extends { prop: string, other: string }>(t: T): T["other"] {
 	return t.other
 }
 ```
+
+> This is not TS behavior:
 
 - Cannot return T["other"] because the function is expected to return T["prop"]
 
@@ -2324,6 +2616,69 @@ Concat("test", "something") satisfies boolean
 
 - Expected boolean, found "test, something"
 
+#### Union with never
+
+```ts
+declare function func<T>(): T | string;
+
+func<number>() satisfies string | number;
+func<never>() satisfies boolean;
+```
+
+- Expected boolean, found string
+
+#### Infer and extends distribution
+
+```ts
+type ElementOf<T> = T extends Array<infer U> ? U : never;
+
+declare let y: ElementOf<Array<number>>;
+declare let z: ElementOf<Array<number> | string>;
+
+y satisfies number;
+z satisfies string;
+
+declare let n: never;
+n satisfies ElementOf<number>;
+```
+
+- Expected string, found number
+
+#### `keyof` type annotation
+
+```ts
+interface X {
+    a: string,
+    b: string
+}
+
+"a" satisfies keyof X;
+"b" satisfies keyof X;
+"c" satisfies keyof X;
+```
+
+- Expected keyof X, found "c"
+
+#### Template literal types
+
+```ts
+type Introduction = `Hello ${string}`;
+
+const first: Introduction = "Hello Ben";
+const second: Introduction = "Hi Ben";
+```
+
+- Type "Hi Ben" is not assignable to type Introduction
+
+#### Assigning to types as keys
+
+```ts
+const x: { [s: string]: number } = { a: 1, b: 2, c: 3 }
+const y: { [s: string]: boolean } = { a: 1, b: 2, c: 3 };
+```
+
+- Type { a: 1, b: 2, c: 3 } is not assignable to type { [string]: boolean }
+
 ### Generic types
 
 #### Generic interface
@@ -2375,13 +2730,13 @@ function add() {
 #### Generic condition
 
 ```ts
-declare function isNumber<T>(t: T): T extends number ? true : false;
+declare function isNumber<T>(t: T): T extends number ? "yeess" : "nno";
 
-isNumber(5) satisfies true;
+isNumber(5) satisfies "yeess";
 isNumber("5") satisfies number;
 ```
 
-- Expected number, found false
+- Expected number, found "nno"
 
 #### More accurate generic
 
@@ -2389,9 +2744,30 @@ isNumber("5") satisfies number;
 declare function unwrap<T>(a: T | { item: T }): T;
 
 unwrap({ item: 5 }) satisfies string;
+unwrap(16) satisfies 16;
 ```
 
 - Expected string, found 5
+
+#### Excess generic arguments
+
+```ts
+declare function generic<T>(a: T);
+
+generic<string, number>("something");
+```
+
+- Expected 1 type argument, but got 2
+
+#### Passing generic type to non-generic function
+
+```ts
+declare function func();
+
+func<string>();
+```
+
+- Cannot pass a type argument to a non-generic function
 
 #### Across alias
 
@@ -2421,6 +2797,8 @@ what(2, 3) satisfies string;
 
 > Aka generic property keys
 
+> Only works for `Record` atm. And while defined in the root environment, want to test the definition here as well
+
 #### Simple key
 
 ```ts
@@ -2438,29 +2816,26 @@ myRecord.hello;
 #### Assignment
 
 ```ts
-type Record2<K extends string, T> = { [P in K]: T }
-
-const x: Record2<"test", boolean> = { no: false },
-      y: Record2<"test", boolean> = { test: 6 },
-      z: Record2<"test", boolean> = { test: false };
+const x: Record<"test", boolean> = { no: false },
+      y: Record<"test", boolean> = { test: 6 },
+      z: Record<"test", boolean> = { test: false };
 ```
 
+- 'no' is not a property of { [\"test\"]: boolean }
 - Type { no: false } is not assignable to type { [\"test\"]: boolean }
 - Type { test: 6 } is not assignable to type { [\"test\"]: boolean }
 
-#### Union and types
+#### Union and types as keys
 
 ```ts
-type Record2<K extends string, T> = { [P in K]: T }
-
-declare let obj1: Record2<"hi" | "hello", boolean>;
+declare let obj1: Record<"hi" | "hello", boolean>;
 
 obj1.hi satisfies boolean;
 obj1.hello satisfies boolean;
 
 obj1.bye;
 
-declare let obj2: Record2<string, boolean>;
+declare let obj2: Record<string, boolean>;
 obj2.fine satisfies boolean;
 obj2[2];
 ```
@@ -2516,6 +2891,15 @@ x.map(a => (a satisfies string, 2))
 ### Object constraint
 
 > Any references to a annotated variable **must** be within its LHS type. These test that it carries down to objects.
+
+#### Object property constraints
+
+```ts
+const my_obj: { a: number } = { a: 2 }
+my_obj.a = "hello world"
+```
+
+- Type "hello world" does not meet property constraint number
 
 #### Nested constraint
 
@@ -2856,6 +3240,65 @@ export const mean_gravity = 9.806;
 
 > This contains new features. Most are WIP
 
+#### Use type annotation in the presence of error
+
+> Note x and y are still string and the function still returns string
+
+```ts
+const x: string = 5;
+const y: string = h;
+
+function getString(a: number): string {
+    return a
+}
+
+x satisfies string;
+y satisfies string;
+
+const z: number = getString(2);
+```
+
+- Cannot return number because the function is expected to return string
+- Type 5 is not assignable to type string
+- Could not find variable 'h' in scope
+- Type (error) string is not assignable to type number
+
+#### Unconditional throw
+
+```ts
+function safeDivide(num: number, denom: number) {
+	if (denom === 0) {
+		throw new Error("Cannot divide by zero");
+	}
+	return num / denom
+}
+
+safeDivide(8, 4) satisfies 2;
+
+safeDivide(10, 0);
+```
+
+- Conditional '[Error] { message: \"Cannot divide by zero\" }' was thrown in function
+
+#### Unreachable statement
+
+```ts
+function throwGreeting() {
+    throw "Hello";
+    return "Unreachable!"
+}
+
+function doSomething() {
+    throwGreeting()
+    const unreachable = 2;
+}
+```
+
+> One is for `return 5` the other is for `const x = 2;`
+
+- Unreachable statement
+- Unreachable statement
+
 #### JSX type
 
 ```tsx
@@ -2894,3 +3337,21 @@ register(document.title)
 ```
 
 - Argument of type string is not assignable to parameter of type Literal\<string\>
+
+#### Errors carries
+
+> Note only one error raised. This prevents the compiler presenting loads of errors if an origin is invalid
+
+```ts
+const obj = { prop: 2 };
+console.log(obj.a.b.c);
+
+function x() {
+	return y
+}
+
+x().nothing
+```
+
+- Could not find variable 'y' in scope
+- No property 'a' on { prop: 2 }

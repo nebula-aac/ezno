@@ -7,7 +7,7 @@ use tokenizer_lib::TokenReader;
 /// Represents a generic parameter. Can have default or constraint to extend a type or a key of a type
 ///
 /// TODO is default and extends mut ex
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[apply(derive_ASTNode)]
 pub struct TypeParameter {
 	pub name: String,
@@ -18,7 +18,9 @@ pub struct TypeParameter {
 	pub is_constant: bool,
 }
 
-impl ListItem for TypeParameter {}
+impl ListItem for TypeParameter {
+	type LAST = ();
+}
 
 impl ASTNode for TypeParameter {
 	fn from_reader(
@@ -71,9 +73,11 @@ impl ASTNode for TypeParameter {
 	) {
 		buf.push_str(&self.name);
 		if let Some(ref extends) = self.extends {
+			buf.push_str(" extends ");
 			extends.to_string_from_buffer(buf, options, local);
 		}
 		if let Some(ref default) = self.default {
+			buf.push_str(" = ");
 			default.to_string_from_buffer(buf, options, local);
 		}
 	}

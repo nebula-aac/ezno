@@ -175,6 +175,7 @@ impl tokenizer_lib::TokenTrait for TSXToken {
 }
 
 impl tokenizer_lib::sized_tokens::SizedToken for TSXToken {
+	#[allow(clippy::cast_possible_truncation)]
 	fn length(&self) -> u32 {
 		match self {
 			TSXToken::Keyword(kw) => kw.length(),
@@ -290,7 +291,7 @@ impl tokenizer_lib::sized_tokens::SizedToken for TSXToken {
 
 impl Eq for TSXToken {}
 
-#[derive(Debug, PartialEq, Eq, EnumVariantsStrings, Clone, Copy)]
+#[derive(Debug, PartialEq, EnumVariantsStrings, Clone, Copy)]
 #[enum_variants_strings_transform(transform = "lower_case")]
 #[rustfmt::skip]
 pub enum TSXKeyword {
@@ -301,7 +302,11 @@ pub enum TSXKeyword {
     Case, Yield, Return, Continue, Break,
     Import, Export, Default, From, With,
     In, Of,
-    TypeOf, InstanceOf, Void, Delete, Assert,
+    TypeOf, InstanceOf, Void, Delete, 
+	/// For [import assertions](https://v8.dev/features/import-assertions) lol
+	Assert,
+	/// For [assertion function type annotations](https://www.typescriptlang.org/docs/handbook/release-notes/typescript-3-7.html#assertion-functions) lol
+	Asserts,
     Debugger,
     Try, Catch, Finally, Throw,
     Async, Await,
@@ -351,6 +356,7 @@ impl TSXKeyword {
 		matches!(self, TSXKeyword::Function | TSXKeyword::Async)
 	}
 
+	#[allow(clippy::cast_possible_truncation)]
 	pub(crate) fn length(self) -> u32 {
 		self.to_str().len() as u32
 	}
@@ -371,6 +377,11 @@ impl TSXKeyword {
 }
 
 impl TSXToken {
+	#[must_use]
+	pub fn is_identifier_or_ident(&self) -> bool {
+		matches!(self, TSXToken::Identifier(_) | TSXToken::Keyword(_))
+	}
+
 	#[must_use]
 	pub fn is_comment(&self) -> bool {
 		matches!(self, TSXToken::Comment(_) | TSXToken::MultiLineComment(_))
@@ -396,8 +407,10 @@ impl TSXToken {
 	pub fn is_expression_prefix(&self) -> bool {
 		matches!(
 			self,
-			TSXToken::Keyword(TSXKeyword::Return | TSXKeyword::Yield | TSXKeyword::Throw | TSXKeyword::TypeOf | TSXKeyword::Await)
+			TSXToken::Keyword(TSXKeyword::Return | TSXKeyword::Case | TSXKeyword::Yield | TSXKeyword::Throw | TSXKeyword::TypeOf | TSXKeyword::In | TSXKeyword::Of | TSXKeyword::Await)
 				| TSXToken::Arrow
+				// for `const x = 2; /something/g`
+				| TSXToken::SemiColon
 				| TSXToken::OpenParentheses
 				| TSXToken::OpenBrace
 				| TSXToken::JSXExpressionStart
@@ -406,11 +419,26 @@ impl TSXToken {
 				| TSXToken::LogicalNot
 				| TSXToken::LogicalAnd
 				| TSXToken::LogicalOr
-				// for `const x = 2; /something/g`
-				| TSXToken::SemiColon
+				| TSXToken::BitwiseNot
+				| TSXToken::BitwiseAnd
+				| TSXToken::BitwiseOr
 				| TSXToken::Multiply
 				| TSXToken::Add
 				| TSXToken::Subtract
+				| TSXToken::Divide
+		) || self.is_assignment()
+	}
+
+	/// For trailing expression comments
+	#[must_use]
+	pub fn is_expression_postfix(&self) -> bool {
+		matches!(
+			self,
+			TSXToken::MultiLineComment(..)
+				| TSXToken::LogicalAnd
+				| TSXToken::LogicalOr
+				| TSXToken::Multiply
+				| TSXToken::Add | TSXToken::Subtract
 				| TSXToken::Divide
 		) || self.is_assignment()
 	}

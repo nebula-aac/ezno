@@ -17,7 +17,7 @@ use visitable_derive::Visitable;
 
 /// [See](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/export)
 #[apply(derive_ASTNode)]
-#[derive(Debug, PartialEq, Eq, Clone, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, PartialEq, Clone, Visitable, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub enum ExportDeclaration {
 	Variable {
@@ -43,7 +43,7 @@ pub enum ExportDeclaration {
 }
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, PartialEq, Eq, Clone, Visitable)]
+#[derive(Debug, PartialEq, Clone, Visitable)]
 pub enum Exportable {
 	Class(ClassDeclaration<StatementPosition>),
 	Function(StatementFunction),
@@ -170,7 +170,7 @@ impl ASTNode for ExportDeclaration {
 					state.append_keyword_at_pos(reader.next().unwrap().1 .0, TSXKeyword::Type);
 					let Token(_, start) = reader.next().unwrap(); // OpenBrace
 
-					let (parts, _end) = crate::parse_bracketed::<ExportPart>(
+					let (parts, _, _end) = crate::parse_bracketed::<ExportPart>(
 						reader,
 						state,
 						options,
@@ -213,7 +213,7 @@ impl ASTNode for ExportDeclaration {
 				});
 				if let Some(Token(token_type, _)) = after_bracket {
 					if let TSXToken::Keyword(TSXKeyword::From) = token_type {
-						let (parts, _end) = crate::parse_bracketed::<ExportPart>(
+						let (parts, _, _end) = crate::parse_bracketed::<ExportPart>(
 							reader,
 							state,
 							options,
@@ -234,7 +234,7 @@ impl ASTNode for ExportDeclaration {
 							position: start.union(end),
 						})
 					} else {
-						let (parts, end) = crate::parse_bracketed::<ExportPart>(
+						let (parts, _, end) = crate::parse_bracketed::<ExportPart>(
 							reader,
 							state,
 							options,
@@ -384,7 +384,7 @@ impl ASTNode for ExportDeclaration {
 ///
 /// Similar to [`ImportPart`] but reversed
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEq, Eq, Visitable, GetFieldByType)]
+#[derive(Debug, Clone, PartialEq, Visitable, GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub enum ExportPart {
 	Name(VariableIdentifier),
@@ -405,7 +405,9 @@ pub enum ExportPart {
 	),
 }
 
-impl ListItem for ExportPart {}
+impl ListItem for ExportPart {
+	type LAST = ();
+}
 
 impl ASTNode for ExportPart {
 	fn get_position(&self) -> Span {

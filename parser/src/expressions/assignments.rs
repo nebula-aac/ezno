@@ -1,6 +1,10 @@
 use crate::{
-	ast::{object_literal::ObjectLiteralMember, FunctionArgument},
-	derive_ASTNode, PropertyKey, PropertyReference, TSXToken,
+	ast::{
+		object_literal::{ObjectLiteral, ObjectLiteralMember},
+		FunctionArgument,
+	},
+	derive_ASTNode, ParseErrors, PropertyKey, PropertyReference, SpreadDestructuringField,
+	TSXToken,
 };
 use derive_partial_eq_extras::PartialEqExtras;
 use get_field_by_type::GetFieldByType;
@@ -17,7 +21,7 @@ use crate::{
 use super::MultipleExpression;
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEqExtras, Eq, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, Clone, PartialEqExtras, Visitable, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 #[partial_eq_ignore_types(Span)]
 pub enum VariableOrPropertyAccess {
@@ -180,30 +184,47 @@ impl VariableOrPropertyAccess {
 #[partial_eq_ignore_types(Span)]
 pub enum LHSOfAssignment {
 	VariableOrPropertyAccess(VariableOrPropertyAccess),
-	ArrayDestructuring(#[visit_skip_field] Vec<WithComment<ArrayDestructuringField>>, Span),
-	ObjectDestructuring(#[visit_skip_field] Vec<WithComment<ObjectDestructuringField>>, Span),
+	ArrayDestructuring {
+		#[visit_skip_field]
+		members: Vec<WithComment<ArrayDestructuringField<LHSOfAssignment>>>,
+		spread: Option<SpreadDestructuringField<LHSOfAssignment>>,
+		position: Span,
+	},
+	ObjectDestructuring {
+		#[visit_skip_field]
+		members: Vec<WithComment<ObjectDestructuringField<LHSOfAssignment>>>,
+		spread: Option<SpreadDestructuringField<LHSOfAssignment>>,
+		position: Span,
+	},
 }
 
-impl LHSOfAssignment {
-	#[must_use]
-	pub fn get_position(&self) -> Span {
+impl ASTNode for LHSOfAssignment {
+	fn get_position(&self) -> Span {
 		match self {
-			LHSOfAssignment::ObjectDestructuring(_, pos)
-			| LHSOfAssignment::ArrayDestructuring(_, pos) => *pos,
+			LHSOfAssignment::ObjectDestructuring { position, .. }
+			| LHSOfAssignment::ArrayDestructuring { position, .. } => *position,
 			LHSOfAssignment::VariableOrPropertyAccess(var_prop_access) => {
 				var_prop_access.get_position()
 			}
 		}
 	}
 
-	pub(crate) fn to_string_from_buffer<T: source_map::ToString>(
+	fn from_reader(
+		reader: &mut impl TokenReader<TSXToken, crate::TokenStart>,
+		state: &mut crate::ParsingState,
+		options: &crate::ParseOptions,
+	) -> ParseResult<Self> {
+		Expression::from_reader(reader, state, options).and_then(TryInto::try_into)
+	}
+
+	fn to_string_from_buffer<T: source_map::ToString>(
 		&self,
 		buf: &mut T,
 		options: &crate::ToStringOptions,
 		local: crate::LocalToStringInformation,
 	) {
 		match self {
-			LHSOfAssignment::ObjectDestructuring(members, _) => {
+			LHSOfAssignment::ObjectDestructuring { members, spread, position: _ } => {
 				buf.push('{');
 				options.push_gap_optionally(buf);
 				for (at_end, member) in members.iter().endiate() {
@@ -213,10 +234,18 @@ impl LHSOfAssignment {
 						options.push_gap_optionally(buf);
 					}
 				}
+				if let Some(ref spread) = spread {
+					if !members.is_empty() {
+						buf.push(',');
+						options.push_gap_optionally(buf);
+					}
+					buf.push_str("...");
+					spread.0.to_string_from_buffer(buf, options, local);
+				}
 				options.push_gap_optionally(buf);
 				buf.push('}');
 			}
-			LHSOfAssignment::ArrayDestructuring(members, _) => {
+			LHSOfAssignment::ArrayDestructuring { members, spread, position: _ } => {
 				buf.push('[');
 				for (at_end, member) in members.iter().endiate() {
 					member.to_string_from_buffer(buf, options, local);
@@ -224,6 +253,14 @@ impl LHSOfAssignment {
 						buf.push(',');
 						options.push_gap_optionally(buf);
 					}
+				}
+				if let Some(ref spread) = spread {
+					if !members.is_empty() {
+						buf.push(',');
+						options.push_gap_optionally(buf);
+					}
+					buf.push_str("...");
+					spread.0.to_string_from_buffer(buf, options, local);
 				}
 				buf.push(']');
 			}
@@ -239,9 +276,10 @@ impl TryFrom<Expression> for LHSOfAssignment {
 
 	fn try_from(value: Expression) -> Result<Self, Self::Error> {
 		match value {
-			Expression::ArrayLiteral(inner, position) => {
-				let mut members = Vec::with_capacity(inner.len());
-				for member in inner {
+			Expression::ArrayLiteral(members, position) => {
+				let mut new_members = Vec::with_capacity(members.len());
+				let mut iter = members.into_iter();
+				for member in iter.by_ref() {
 					let new_member = match member.0 {
 						Some(FunctionArgument::Comment { content, is_multiline: _, position }) => {
 							WithComment::PrefixComment(
@@ -251,71 +289,70 @@ impl TryFrom<Expression> for LHSOfAssignment {
 							)
 						}
 						Some(FunctionArgument::Spread(expression, span)) => {
-							let lhs: LHSOfAssignment = expression.try_into()?;
-							let lhs: crate::VariableField = lhs_to_variable_field(lhs)?;
-							WithComment::None(ArrayDestructuringField::Spread(lhs, span))
+							return if let Some(next) = iter.next() {
+								Err(ParseError::new(
+									ParseErrors::CannotHaveRegularMemberAfterSpread,
+									next.get_position(),
+								))
+							} else {
+								let inner: LHSOfAssignment = expression.try_into()?;
+								Ok(Self::ArrayDestructuring {
+									members: new_members,
+									spread: Some(SpreadDestructuringField(Box::new(inner), span)),
+									position,
+								})
+							}
 						}
 						Some(FunctionArgument::Standard(expression)) => {
 							WithComment::None(match expression {
 								Expression::Assignment { lhs, rhs, position: _ } => {
-									let lhs: crate::VariableField = lhs_to_variable_field(lhs)?;
-									ArrayDestructuringField::Name(lhs, Some(rhs))
+									ArrayDestructuringField::Name(lhs, (), Some(rhs))
 								}
-								Expression::ArrayLiteral(..) | Expression::ObjectLiteral(..) => {
-									let lhs: LHSOfAssignment = expression.try_into()?;
-									let lhs: crate::VariableField = lhs_to_variable_field(lhs)?;
-									ArrayDestructuringField::Name(lhs, None)
-								}
-								Expression::VariableReference(reference, pos) => {
-									let name = crate::VariableIdentifier::Standard(reference, pos);
-									ArrayDestructuringField::Name(
-										crate::VariableField::Name(name),
-										None,
-									)
-								}
-								_ => {
-									return Err(ParseError::new(
-										crate::ParseErrors::InvalidLHSAssignment,
-										expression.get_position(),
-									))
+								expression => {
+									ArrayDestructuringField::Name(expression.try_into()?, (), None)
 								}
 							})
 						}
 						None => WithComment::None(ArrayDestructuringField::None),
 					};
-					members.push(new_member);
+					new_members.push(new_member);
 				}
-				Ok(Self::ArrayDestructuring(members, position))
+				Ok(Self::ArrayDestructuring { members: new_members, spread: None, position })
 			}
-			Expression::ObjectLiteral(inner) => {
-				let mut members = Vec::with_capacity(inner.members.len());
-				for member in inner.members {
-					let new_member: ObjectDestructuringField = match member {
-						ObjectLiteralMember::Spread(expression, _) => {
-							if let Expression::VariableReference(reference, pos) = expression {
-								ObjectDestructuringField::Spread(
-									crate::VariableIdentifier::Standard(reference, pos),
-									pos,
-								)
+			Expression::ObjectLiteral(ObjectLiteral { members, position }) => {
+				let mut new_members = Vec::with_capacity(members.len());
+				let mut iter = members.into_iter();
+				for member in iter.by_ref() {
+					let new_member: ObjectDestructuringField<LHSOfAssignment> = match member {
+						ObjectLiteralMember::Spread(expression, span) => {
+							return if let Some(next) = iter.next() {
+								Err(ParseError::new(
+									ParseErrors::CannotHaveRegularMemberAfterSpread,
+									next.get_position(),
+								))
 							} else {
-								return Err(ParseError::new(
-									crate::ParseErrors::InvalidLHSAssignment,
-									expression.get_position(),
-								));
+								let inner: LHSOfAssignment = expression.try_into()?;
+								Ok(Self::ObjectDestructuring {
+									members: new_members,
+									spread: Some(SpreadDestructuringField(Box::new(inner), span)),
+									position,
+								})
 							}
 						}
 						ObjectLiteralMember::Shorthand(name, pos) => {
 							ObjectDestructuringField::Name(
 								crate::VariableIdentifier::Standard(name, pos),
+								(),
 								None,
 								pos,
 							)
 						}
 						ObjectLiteralMember::Property { assignment, key, position, value } => {
 							if assignment {
-								if let PropertyKey::Ident(name, pos, _) = key.get_ast() {
+								if let PropertyKey::Identifier(name, pos, _) = key.get_ast() {
 									ObjectDestructuringField::Name(
 										crate::VariableIdentifier::Standard(name, pos),
+										(),
 										Some(Box::new(value)),
 										pos,
 									)
@@ -329,16 +366,14 @@ impl TryFrom<Expression> for LHSOfAssignment {
 								let (name, default_value) =
 									if let Expression::Assignment { lhs, rhs, position: _ } = value
 									{
-										let lhs: crate::VariableField = lhs_to_variable_field(lhs)?;
 										(lhs, Some(rhs))
 									} else {
-										let lhs: LHSOfAssignment = value.try_into()?;
-										let lhs: crate::VariableField = lhs_to_variable_field(lhs)?;
-										(lhs, None)
+										(value.try_into()?, None)
 									};
 
 								ObjectDestructuringField::Map {
 									from: key.get_ast(),
+									annotation: (),
 									name: WithComment::None(name),
 									default_value,
 									position,
@@ -348,34 +383,19 @@ impl TryFrom<Expression> for LHSOfAssignment {
 						ObjectLiteralMember::Method(_) => {
 							return Err(ParseError::new(
 								crate::ParseErrors::InvalidLHSAssignment,
-								inner.position,
+								position,
 							))
 						}
+						ObjectLiteralMember::Comment(..) => {
+							continue;
+						}
 					};
-					members.push(WithComment::None(new_member));
+					new_members.push(WithComment::None(new_member));
 				}
-				Ok(Self::ObjectDestructuring(members, inner.position))
+				Ok(Self::ObjectDestructuring { members: new_members, spread: None, position })
 			}
 			expression => VariableOrPropertyAccess::try_from(expression)
 				.map(LHSOfAssignment::VariableOrPropertyAccess),
-		}
-	}
-}
-
-fn lhs_to_variable_field(lhs: LHSOfAssignment) -> Result<crate::VariableField, ParseError> {
-	match lhs {
-		LHSOfAssignment::VariableOrPropertyAccess(VariableOrPropertyAccess::Variable(
-			name,
-			pos,
-		)) => Ok(crate::VariableField::Name(crate::VariableIdentifier::Standard(name, pos))),
-		LHSOfAssignment::ArrayDestructuring(fields, pos) => {
-			Ok(crate::VariableField::Array(fields, pos))
-		}
-		LHSOfAssignment::ObjectDestructuring(fields, pos) => {
-			Ok(crate::VariableField::Object(fields, pos))
-		}
-		LHSOfAssignment::VariableOrPropertyAccess(a) => {
-			Err(ParseError::new(crate::ParseErrors::InvalidLHSAssignment, a.get_position()))
 		}
 	}
 }

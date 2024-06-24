@@ -1,156 +1,314 @@
-// ↓↓ Ezno testing functions ↓↓
-declare function debug_context(): void performs const debug_context;
-declare function print_type(t: any): void performs const print_type;
-declare function print_and_debug_type(t: any): void performs const print_and_debug_type;
-declare function print_constraint(t: any): void performs const print_constraint;
-declare function debug_type(t: any): void performs const debug_type;
-declare function debug_type_independent(t: any): void performs const debug_type_independent;
-declare function debug_type_rust(t: any): void performs const debug_type_rust;
-declare function debug_type_rust_independent(t: any): void performs const debug_type_rust_independent;
-declare function debug_effects_rust(t: () => {}): void performs const debug_effects_rust;
-declare function debug_effects(t: () => {}): void performs const debug_effects;
-declare function is_dependent(t: any): void performs const is_dependent;
+// This contains some of definitions from overrides. Some can be removed during development to test things (and to remove things that might be causing a crash)
 
-declare function context_id(): void performs const context_id;
-declare function context_id_chain(): void performs const context_id_chain;
+@Constant
+declare function print_type<T>(...args: Array<T>): void
+@Constant
+declare function debug_type<T>(...args: Array<T>): void
+@Constant
+declare function print_and_debug_type<T>(...args: Array<T>): void
+@Constant
+declare function print_constraint(t: any): void
+@Constant
+declare function debug_type_rust(t: any): void
+@Constant
+declare function debug_type_rust_independent(t: any): void
+
+@Constant
+declare function debug_effects_rust(t: () => {}): void
+@Constant
+declare function debug_effects(t: () => {}): void
+
+@Constant
+declare function is_dependent(t: any): void
+@Constant
+declare function print_environment_state<T>(): any
+
+@Constant
+declare function debug_context(): void
+@Constant
+declare function context_id(): void
+@Constant
+declare function context_id_chain(): void
 
 // A function, as it should be!
-declare function satisfies<T>(t: T): T performs const satisfies;
+@Constant
+declare function satisfies<T>(t: T): T
 
-declare function compile_type_to_object<T>(): any performs const compile_type_to_object;
-// ↑↑ Ezno Functions ↑↑
+@Constant
+declare function compile_type_to_object<T>(): any
 
-// declare var undefined: undefined;
+interface ImportEnv {
+    [key: string]: string | undefined;
+}
 
-interface nominal Array<T> {
+interface ImportMeta {
+    env: ImportEnv;
+    url: string;
+    resolve(url: string): string;
+}
+
+declare class Array<T> {
     [index: number]: T | undefined;
-    
+
     length: number;
 
-    push(item: T) performs {
+    push(item: T) {
         this[this.length] = item;
         return ++this.length
     }
 
-    pop(): T | undefined performs {
+    pop(): T | undefined {
         if (this.length === 0) {
             return undefined
         } else {
             const value = this[--this.length];
-            delete this[this.length];
+            // TODO this breaks things
+            // delete this[this.length];
+            // debug_type_rust_independent(value);
             return value
         }
     }
 
-    // TODO this argument
-    map<U>(cb: (t: T, i?: number) => U): Array<U> performs {
-        const { length } = this, u: Array<U> = [];
+    // // TODO this argument
+    map<U>(cb: (t: T, i?: number) => U): Array<U> {
+        const { length } = this, mapped: Array<U> = [];
         let i: number = 0;
         while (i < length) {
             const value = this[i];
-            u.push(cb(value, i++))
+            mapped.push(cb(value, i++))
         }
-        return u;
+        return mapped;
     }
 
-    map2<U>(cb: (t: T, i?: number) => U): any performs {
-        return cb;
-    }
-
-    filter(cb: (t: T, i?: number) => any): Array<T> performs {
+    // // TODO any is debatable
+    filter(cb: (t: T, i?: number) => any): Array<T> {
         const { length } = this, filtered: Array<T> = [];
         let i: number = 0;
         while (i < length) {
             const value = this[i];
-            const res = cb(value, i++)
-            // debug_type_independent(res)
-            if (res) {
+            if (cb(value, i++)) {
                 filtered.push(value)
             }
         }
         return filtered;
     }
 
-    // last() performs {
-    //     return this[this.length - 1]
+    // TODO any is debatable
+    find(cb: (t: T, i?: number) => any): T | undefined {
+        const { length } = this;
+        let i: number = 0;
+        while (i < length) {
+            const value = this[i];
+            if (cb(value, i++)) {
+                return value
+            }
+        }
+    }
+
+    // TODO any is debatable
+    every(cb: (t: T, i?: number) => any): boolean {
+        const { length } = this;
+        let i: number = 0;
+        while (i < length) {
+            const value = this[i];
+            if (!cb(value, i++)) {
+                return false
+            }
+        }
+        // Vacuous truth
+        return true
+    }
+
+    // some(cb: (t: T, i?: number) => any): boolean {
+    //     const { length } = this;
+    //     let i: number = 0;
+    //     while (i < length) {
+    //         const value = this[i];
+    //         if (cb(value, i++)) {
+    //             return true
+    //         }
+    //     }
+    //     return false
+    // }
+
+    join(joiner: string = ","): string {
+        const { length } = this;
+        let i: number = 1;
+        if (length === 0) {
+            return ""
+        }
+        let s: string = "" + this[0];
+        while (i < length) {
+            s += joiner;
+            s += this[i++];
+        }
+        return s
+    }
+
+    at(index: number) {
+        if (index < 0) {
+            return this[index + this.length]
+        } else {
+            return this[index]
+        }
+    }
+}
+
+type Record<K extends string, T> = { [P in K]: T }
+
+declare class Map<T, U> {
+    #keys: Array<T> = [];
+    #value: Array<T> = [];
+}
+
+declare class Math {
+    @Constant
+    static sin(x: number): number;
+    @Constant
+    static cos(x: number): number;
+    @Constant
+    static tan(x: number): number;
+    @Constant
+    static floor(x: number): number;
+    @Constant
+    static sqrt(x: number): number;
+    @Constant
+    static cbrt(x: number): number;
+
+    // TODO newer method
+    @Constant
+    static trunc(x: number): number;
+
+    static PI: 3.141592653589793
+}
+
+@Primitive("string")
+declare class String {
+    [index: number]: string | undefined;
+
+    @Constant
+    toUpperCase(): string;
+    @Constant
+    toLowerCase(): string;
+
+    get length(): number;
+
+    // TODO
+    slice(start: number, end?: number): string;
+
+    // TODO
+    split(splitter: string): Array<string>;
+}
+
+declare class Promise<T> { }
+
+type ResponseBody = string;
+
+declare class Response {
+    ok: boolean;
+
+    // constructor(body?: ResponseBody, options: any);
+
+    // json(): Promise<any>;
+
+    // static json(data: any): Response {
+    //     return new Response(JSON.stringify(data))
     // }
 }
 
-interface Math {
-    @DoNotIncludeThis
-    sin(x: number): number performs const sin;
-    @DoNotIncludeThis
-    cos(x: number): number performs const cos;
-    @DoNotIncludeThis
-    tan(x: number): number performs const tan;
-    @DoNotIncludeThis
-    floor(x: number): number performs const floor;
-    @DoNotIncludeThis
-    sqrt(x: number): number performs const sqrt;
-    @DoNotIncludeThis
-    cbrt(x: number): number performs const cbrt;
-
-    // TODO newer method
-    trunc(x: number): number performs const trunc;
-
-    PI: 3.141592653589793
+declare class Console {
+    @InputOutput
+    log(...data: any[]): void;
 }
 
-interface nominal string {
-    [index: number]: string | undefined;
+declare const console: Console;
 
-    toUpperCase(): string performs const uppercase;
-    toLowerCase(): string performs const lowercase;
+declare class Error {
+    message: string
 
-    get length(): number performs const string_length;
+    // TODO `@AllowElidedNew`
+    constructor(message: string) {
+        this.message = message
+    }
 }
 
-interface Console {
-    @DoNotIncludeThis
-    log(msg: any): void;
+declare class SyntaxError extends Error {
+    constructor() { super("syntax error") }
 }
 
-interface JSON {
+declare class JSON {
     // TODO any temp
-    @DoNotIncludeThis
-    parse(input: string): any;
+    @Constant("json:parse", SyntaxError)
+    static parse(input: string): any;
 
     // TODO any temp
-    @DoNotIncludeThis
-    stringify(input: any): string;
+    @Constant("json:stringify")
+    static stringify(input: any): string;
 }
 
-interface Function {
-    bind(this_ty: any): Function performs const bind;
+declare class Function {
+    bind(this_ty: any): Function;
 }
 
-interface Symbols {
+declare class Symbols {
     // TODO temp
     iterator: 199
 }
 
-declare const Symbol: Symbols;
+declare class Proxy {
+    @Constant("proxy:constructor")
+        constructor(obj: any, cb: any);
+}
 
-interface Object {
-    @DoNotIncludeThis
-    setPrototypeOf(on: object, to: object): object performs const set_prototype;
+declare class Object {
+    @Constant
+    static setPrototypeOf(on: object, to: object): object;
 
-    @DoNotIncludeThis
-    getPrototypeOf(on: object): object | null performs const get_prototype;
+    @Constant
+    static getPrototypeOf(on: object): object | null;
 
-    // create(prototype: object): object performs {
+    // static create(prototype: object): object {
     //     const n = {};
     //     Object.setProtoTypeOf(n, prototype);
     //     return n
     // }
+
+    static keys(on: { [s: string]: any }): Array<string> {
+        const keys: Array<string> = [];
+        for (const key in on) {
+            keys.push(key);
+        }
+        return keys
+    }
+
+    static values(on: { [s: string]: any }): Array<any> {
+        const values: Array<any> = [];
+        for (const key in on) {
+            values.push(on[key]);
+        }
+        return values
+    }
+
+    static entries(on: { [s: string]: any }): Array<[string, any]> {
+        const entries: Array<[string, any]> = [];
+        for (const key in on) {
+            entries.push([key, on[key]]);
+        }
+        return entries
+    }
+
+    // static fromEntries(iterator: any): object {
+    //     const obj = {};
+    //     for (const item of iterator) {
+    //         const { 0: key, 1: value } = item;
+    //         obj[key] = value;
+    //     }
+    //     return obj
+    // }
 }
 
-declare const JSON: JSON;
-declare const Math: Math;
-declare const console: Console;
-declare const Object: Object;
-
-declare function JSXH(tag: string, attributes: any, children?: any) performs {
+// TODO wip
+declare function JSXH(tag: string, attributes: any, children?: any) {
     return { tag, attributes, children }
 }
 
@@ -161,8 +319,9 @@ interface Document {
 interface FormData {
 }
 
+// TODO temp
+@InputOutput
+declare function fetch(from: string): Promise<Response>;
+
 @client
 declare const document: Document;
-
-// @server
-// declare function createItem(a: any);

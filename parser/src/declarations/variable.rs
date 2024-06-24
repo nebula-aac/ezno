@@ -4,8 +4,9 @@ use iterator_endiate::EndiateIteratorExt;
 
 use crate::{
 	derive_ASTNode, errors::parse_lexing_error, expressions::operators::COMMA_PRECEDENCE,
-	throw_unexpected_token_with_token, ASTNode, Expression, ParseOptions, ParseResult, Span,
-	TSXKeyword, TSXToken, Token, TokenReader, TypeAnnotation, VariableField, WithComment,
+	throw_unexpected_token_with_token, ASTNode, Expression, ParseError, ParseErrors, ParseOptions,
+	ParseResult, Span, TSXKeyword, TSXToken, Token, TokenReader, TypeAnnotation, VariableField,
+	WithComment,
 };
 use visitable_derive::Visitable;
 
@@ -120,7 +121,7 @@ impl DeclarationExpression for crate::Expression {
 
 /// Represents a name =
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEqExtras, Eq, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, Clone, PartialEqExtras, Visitable, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 #[partial_eq_ignore_types(Span)]
 pub struct VariableDeclarationItem<TExpr: DeclarationExpression> {
@@ -170,16 +171,7 @@ impl<TExpr: DeclarationExpression + 'static> ASTNode for VariableDeclarationItem
 			buf.push_str(": ");
 			type_annotation.to_string_from_buffer(buf, options, local);
 		}
-		let available_space =
-			u32::from(options.max_line_length).checked_sub(buf.characters_on_current_line());
 
-		if let Some(e) = TExpr::as_option_expression_ref(&self.expression) {
-			let extends_limit = crate::is_node_over_length(e, options, local, available_space);
-			if extends_limit {
-				buf.push_new_line();
-				options.add_indent(local.depth + 1, buf);
-			}
-		}
 		self.expression.expression_to_string_from_buffer(buf, options, local);
 	}
 
@@ -189,7 +181,7 @@ impl<TExpr: DeclarationExpression + 'static> ASTNode for VariableDeclarationItem
 }
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEqExtras, Eq, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, Clone, PartialEqExtras, Visitable, get_field_by_type::GetFieldByType)]
 #[partial_eq_ignore_types(Span)]
 #[get_field_by_type_target(Span)]
 pub enum VariableDeclaration {
@@ -203,7 +195,7 @@ pub enum VariableDeclaration {
 	},
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Visitable)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Visitable)]
 #[apply(derive_ASTNode)]
 pub enum VariableDeclarationKeyword {
 	Const,
@@ -250,6 +242,15 @@ impl ASTNode for VariableDeclaration {
 				state.append_keyword_at_pos(start.0, TSXKeyword::Let);
 				let mut declarations = Vec::new();
 				loop {
+					// Some people like to have trailing comments in declarations ?
+					if reader.peek().is_some_and(|t| t.0.is_comment()) {
+						let (..) = TSXToken::try_into_comment(reader.next().unwrap()).unwrap();
+						if reader.peek_n(1).is_some_and(|t| !t.0.is_identifier_or_ident()) {
+							break;
+						}
+						continue;
+					}
+
 					let value = VariableDeclarationItem::<Option<Expression>>::from_reader(
 						reader, state, options,
 					)?;
@@ -270,15 +271,33 @@ impl ASTNode for VariableDeclaration {
 						break;
 					}
 				}
-				VariableDeclaration::LetDeclaration {
-					position: start.union(declarations.last().unwrap().get_position()),
-					declarations,
-				}
+
+				let position = if let Some(last) = declarations.last() {
+					start.union(last.get_position())
+				} else {
+					let position = start.with_length(3);
+					if options.partial_syntax {
+						position
+					} else {
+						return Err(ParseError::new(ParseErrors::ExpectedDeclaration, position));
+					}
+				};
+
+				VariableDeclaration::LetDeclaration { position, declarations }
 			}
 			VariableDeclarationKeyword::Const => {
 				state.append_keyword_at_pos(start.0, TSXKeyword::Const);
 				let mut declarations = Vec::new();
 				loop {
+					// Some people like to have trailing comments in declarations ?
+					if reader.peek().is_some_and(|t| t.0.is_comment()) {
+						let (..) = TSXToken::try_into_comment(reader.next().unwrap()).unwrap();
+						if reader.peek_n(1).is_some_and(|t| !t.0.is_identifier_or_ident()) {
+							break;
+						}
+						continue;
+					}
+
 					let value =
 						VariableDeclarationItem::<Expression>::from_reader(reader, state, options)?;
 					declarations.push(value);
@@ -288,10 +307,19 @@ impl ASTNode for VariableDeclaration {
 						break;
 					}
 				}
-				VariableDeclaration::ConstDeclaration {
-					position: start.union(declarations.last().unwrap().get_position()),
-					declarations,
-				}
+
+				let position = if let Some(last) = declarations.last() {
+					start.union(last.get_position())
+				} else {
+					let position = start.with_length(3);
+					if options.partial_syntax {
+						position
+					} else {
+						return Err(ParseError::new(ParseErrors::ExpectedDeclaration, position));
+					}
+				};
+
+				VariableDeclaration::ConstDeclaration { position, declarations }
 			}
 		})
 	}
@@ -308,14 +336,34 @@ impl ASTNode for VariableDeclaration {
 					return;
 				}
 				buf.push_str("let ");
-				declarations_to_string(declarations, buf, options, local);
+				let available_space = u32::from(options.max_line_length)
+					.saturating_sub(buf.characters_on_current_line());
+
+				let split_lines = crate::are_nodes_over_length(
+					declarations.iter(),
+					options,
+					local,
+					Some(available_space),
+					true,
+				);
+				declarations_to_string(declarations, buf, options, local, split_lines);
 			}
 			VariableDeclaration::ConstDeclaration { declarations, .. } => {
 				if declarations.is_empty() {
 					return;
 				}
 				buf.push_str("const ");
-				declarations_to_string(declarations, buf, options, local);
+				let available_space = u32::from(options.max_line_length)
+					.saturating_sub(buf.characters_on_current_line());
+
+				let split_lines = crate::are_nodes_over_length(
+					declarations.iter(),
+					options,
+					local,
+					Some(available_space),
+					true,
+				);
+				declarations_to_string(declarations, buf, options, local, split_lines);
 			}
 		}
 	}
@@ -340,12 +388,18 @@ pub(crate) fn declarations_to_string<
 	buf: &mut T,
 	options: &crate::ToStringOptions,
 	local: crate::LocalToStringInformation,
+	separate_lines: bool,
 ) {
 	for (at_end, declaration) in declarations.iter().endiate() {
 		declaration.to_string_from_buffer(buf, options, local);
 		if !at_end {
 			buf.push(',');
-			options.push_gap_optionally(buf);
+			if separate_lines {
+				buf.push_new_line();
+				options.add_indent(local.depth + 1, buf);
+			} else {
+				options.push_gap_optionally(buf);
+			}
 		}
 	}
 }

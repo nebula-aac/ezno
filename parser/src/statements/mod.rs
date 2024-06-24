@@ -8,6 +8,7 @@ use crate::{
 	declarations::variable::{declarations_to_string, VariableDeclarationItem},
 	derive_ASTNode,
 	tokens::token_as_identifier,
+	ParseError, ParseErrors,
 };
 use derive_enum_from_into::{EnumFrom, EnumTryInto};
 use derive_partial_eq_extras::PartialEqExtras;
@@ -19,7 +20,7 @@ use super::{
 	TSXKeyword, TSXToken, Token, TokenReader,
 };
 use crate::errors::parse_lexing_error;
-pub use for_statement::{ForLoopCondition, ForLoopStatement, ForLoopStatementInitializer};
+pub use for_statement::{ForLoopCondition, ForLoopStatement, ForLoopStatementInitialiser};
 pub use if_statement::*;
 pub use switch_statement::{SwitchBranch, SwitchStatement};
 pub use try_catch_statement::TryCatchStatement;
@@ -61,8 +62,9 @@ pub enum Statement {
 		statement: Box<Statement>,
 	},
 	VarVariable(VarVariableStatement),
-	// TODO position
 	Empty(Span),
+	/// Lol
+	AestheticSemiColon(Span),
 }
 
 #[apply(derive_ASTNode)]
@@ -87,15 +89,18 @@ impl ASTNode for Statement {
 		state: &mut crate::ParsingState,
 		options: &ParseOptions,
 	) -> ParseResult<Self> {
+		// Labeled statements
 		if let Some(Token(TSXToken::Colon, _)) = reader.peek_n(1) {
 			let (name, label_name_pos) = token_as_identifier(reader.next().unwrap(), "label name")?;
 			let _colon = reader.next().unwrap();
 			let statement = Statement::from_reader(reader, state, options).map(Box::new)?;
 			if statement.requires_semi_colon() {
-				crate::expect_semi_colon(
+				let _ = crate::expect_semi_colon(
 					reader,
 					&state.line_starts,
 					statement.get_position().start,
+					// TODO
+					false,
 				)?;
 			}
 			// TODO statement.can_be_labelled()
@@ -198,7 +203,9 @@ impl ASTNode for Statement {
 					unreachable!()
 				}
 			}
-			TSXToken::SemiColon => Ok(Statement::Empty(reader.next().unwrap().get_span())),
+			TSXToken::SemiColon => {
+				Ok(Statement::AestheticSemiColon(reader.next().unwrap().get_span()))
+			}
 			// Finally ...!
 			_ => {
 				let expr = MultipleExpression::from_reader(reader, state, options)?;
@@ -214,9 +221,8 @@ impl ASTNode for Statement {
 		local: crate::LocalToStringInformation,
 	) {
 		match self {
-			Statement::Empty(..) => {
-				buf.push(';');
-			}
+			Statement::Empty(..) => {}
+			Statement::AestheticSemiColon(..) => buf.push(';'),
 			Statement::Return(ReturnStatement(expression, _)) => {
 				buf.push_str("return");
 				if let Some(expression) = expression {
@@ -239,7 +245,18 @@ impl ASTNode for Statement {
 			Statement::MultiLineComment(comment, _) => {
 				if options.should_add_comment(comment.starts_with('*')) {
 					buf.push_str("/*");
-					buf.push_str_contains_new_line(comment.as_str());
+					if options.pretty {
+						// Perform indent correction
+						for (idx, line) in comment.split('\n').enumerate() {
+							if idx > 0 {
+								buf.push_new_line();
+							}
+							options.add_indent(local.depth, buf);
+							buf.push_str(line.trim());
+						}
+					} else {
+						buf.push_str_contains_new_line(comment.as_str());
+					}
 					buf.push_str("*/");
 				}
 			}
@@ -268,10 +285,14 @@ impl ASTNode for Statement {
 				buf.push_str(name);
 				buf.push_str(": ");
 
-				// TODO new line?
-				statement.to_string_from_buffer(buf, options, local);
-				if statement.requires_semi_colon() {
+				if let Statement::Empty(..) = &**statement {
 					buf.push(';');
+				} else {
+					// TODO new line?
+					statement.to_string_from_buffer(buf, options, local);
+					if statement.requires_semi_colon() {
+						buf.push(';');
+					}
 				}
 			}
 			Statement::Throw(ThrowStatement(thrown_expression, _)) => {
@@ -305,7 +326,7 @@ impl Statement {
 }
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, PartialEq, Eq, Clone, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, PartialEq, Clone, Visitable, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub struct VarVariableStatement {
 	pub declarations: Vec<VariableDeclarationItem<Option<Expression>>>,
@@ -342,10 +363,19 @@ impl ASTNode for VarVariableStatement {
 				break;
 			}
 		}
-		Ok(VarVariableStatement {
-			position: start.union(declarations.last().unwrap().get_position()),
-			declarations,
-		})
+
+		let position = if let Some(last) = declarations.last() {
+			start.union(last.get_position())
+		} else {
+			let position = start.with_length(3);
+			if options.partial_syntax {
+				position
+			} else {
+				return Err(ParseError::new(ParseErrors::ExpectedDeclaration, position));
+			}
+		};
+
+		Ok(VarVariableStatement { declarations, position })
 	}
 
 	fn to_string_from_buffer<T: source_map::ToString>(
@@ -355,7 +385,7 @@ impl ASTNode for VarVariableStatement {
 		local: crate::LocalToStringInformation,
 	) {
 		buf.push_str("var ");
-		declarations_to_string(&self.declarations, buf, options, local);
+		declarations_to_string(&self.declarations, buf, options, local, false);
 	}
 }
 

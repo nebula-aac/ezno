@@ -15,7 +15,7 @@ use tokenizer_lib::{
 use visitable_derive::Visitable;
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, Eq, PartialEq, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, Clone, PartialEq, Visitable, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub struct Parameter<V> {
 	#[visit_skip_field]
@@ -66,7 +66,7 @@ impl ParameterVisibility for Option<crate::types::Visibility> {
 	}
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Visitable)]
+#[derive(Debug, Clone, PartialEq, Visitable)]
 #[apply(derive_ASTNode)]
 pub enum ParameterData {
 	Optional,
@@ -82,7 +82,7 @@ pub type SpreadParameterName = VariableField;
 pub type SpreadParameterName = crate::VariableIdentifier;
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, Eq, PartialEq, Visitable)]
+#[derive(Debug, Clone, PartialEq, Visitable)]
 pub struct SpreadParameter {
 	pub name: SpreadParameterName,
 	pub type_annotation: Option<TypeAnnotation>,
@@ -90,7 +90,7 @@ pub struct SpreadParameter {
 }
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEqExtras, Eq, Visitable)]
+#[derive(Debug, Clone, PartialEqExtras, Visitable)]
 #[partial_eq_ignore_types(Span)]
 pub struct FunctionParameters<L, V> {
 	#[visit_skip_field]
@@ -111,7 +111,7 @@ pub trait LeadingParameter: Send + Sync + Sized + Debug + PartialEq + Clone + 's
 }
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEqExtras, Eq, Visitable)]
+#[derive(Debug, Clone, PartialEqExtras, Visitable)]
 #[partial_eq_ignore_types(Span)]
 pub struct ThisParameter {
 	pub constraint: TypeAnnotation,
@@ -120,7 +120,7 @@ pub struct ThisParameter {
 
 /// TODO WIP!
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEqExtras, Eq, Visitable)]
+#[derive(Debug, Clone, PartialEqExtras, Visitable)]
 #[partial_eq_ignore_types(Span)]
 pub struct SuperParameter {
 	pub constraint: TypeAnnotation,
@@ -211,12 +211,49 @@ where
 		local: crate::LocalToStringInformation,
 	) {
 		let FunctionParameters { parameters, rest_parameter, .. } = self;
+		let mut large = false;
+		if options.enforce_limit_length_limit() && local.should_try_pretty_print {
+			let room = options.max_line_length as usize;
+			let mut buf = source_map::StringWithOptionalSourceMap {
+				source: String::new(),
+				source_map: None,
+				quit_after: Some(room),
+				since_new_line: 0,
+			};
+			// Not particularly accurate but does sort of work
+			for parameter in parameters {
+				parameter.name.to_string_from_buffer(&mut buf, options, local);
+				let type_annotation = parameter.type_annotation.as_ref();
+				type_annotation.inspect(|v| v.to_string_from_buffer(&mut buf, options, local));
+				if let Some(ParameterData::WithDefaultValue(ref value)) = parameter.additionally {
+					value.to_string_from_buffer(&mut buf, options, local);
+				}
+				large = buf.source.len() > room;
+				if large {
+					break;
+				}
+			}
+			if let Some(rest_parameter) = rest_parameter {
+				rest_parameter.name.to_string_from_buffer(&mut buf, options, local);
+				let type_annotation = rest_parameter.type_annotation.as_ref();
+				type_annotation.inspect(|v| v.to_string_from_buffer(&mut buf, options, local));
+				large = buf.source.len() > room;
+			}
+		}
+
+		let inner_local = if large { local.next_level() } else { local };
+
 		buf.push('(');
+		// let local = if large { local.next_level() } else { local };
 		for (at_end, Parameter { name, type_annotation, additionally, .. }) in
 			parameters.iter().endiate()
 		{
-			// decorators_to_string_from_buffer(decorators, buf, options, local);
-			name.to_string_from_buffer(buf, options, local);
+			if large {
+				buf.push_new_line();
+				options.add_indent(inner_local.depth, buf);
+			}
+			// decorators_to_string_from_buffer(decorators, buf, options, inner_local);
+			name.to_string_from_buffer(buf, options, inner_local);
 			if let (true, Some(ref type_annotation)) =
 				(options.include_type_annotations, type_annotation)
 			{
@@ -224,11 +261,11 @@ where
 					buf.push('?');
 				}
 				buf.push_str(": ");
-				type_annotation.to_string_from_buffer(buf, options, local);
+				type_annotation.to_string_from_buffer(buf, options, inner_local);
 			}
 			if let Some(ParameterData::WithDefaultValue(value)) = additionally {
 				buf.push_str(if options.pretty { " = " } else { "=" });
-				value.to_string_from_buffer(buf, options, local);
+				value.to_string_from_buffer(buf, options, inner_local);
 			}
 			if !at_end || rest_parameter.is_some() {
 				buf.push(',');
@@ -236,12 +273,20 @@ where
 			}
 		}
 		if let Some(rest_parameter) = rest_parameter {
+			if large {
+				buf.push_new_line();
+				options.add_indent(inner_local.depth, buf);
+			}
 			buf.push_str("...");
-			rest_parameter.name.to_string_from_buffer(buf, options, local);
+			rest_parameter.name.to_string_from_buffer(buf, options, inner_local);
 			if let Some(ref type_annotation) = rest_parameter.type_annotation {
 				buf.push_str(": ");
-				type_annotation.to_string_from_buffer(buf, options, local);
+				type_annotation.to_string_from_buffer(buf, options, inner_local);
 			}
+		}
+		if large {
+			buf.push_new_line();
+			options.add_indent(local.depth, buf);
 		}
 		buf.push(')');
 	}

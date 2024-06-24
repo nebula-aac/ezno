@@ -51,12 +51,13 @@ impl crate::ASTImplementation for EznoParser {
 	type TypeAnnotation<'_a> = parser::TypeAnnotation;
 	type TypeParameter<'_a> = parser::TypeParameter;
 	type Expression<'_a> = parser::Expression;
+	type Block<'_a> = parser::Block;
 	type MultipleExpression<'_a> = parser::expressions::MultipleExpression;
 	type ClassMethod<'_a> = parser::FunctionBase<parser::ast::ClassFunctionBase>;
 
 	type VariableField<'_a> = parser::VariableField;
 
-	type ForStatementInitiliser<'_a> = parser::statements::ForLoopStatementInitializer;
+	type ForStatementInitiliser<'_a> = parser::statements::ForLoopStatementInitialiser;
 
 	fn module_from_string(
 		// TODO remove
@@ -116,6 +117,12 @@ impl crate::ASTImplementation for EznoParser {
 		&parameter.name
 	}
 
+	fn type_annotation_position<'_a>(
+		annotation: &'_a Self::TypeAnnotation<'_a>,
+	) -> source_map::Span {
+		ASTNode::get_position(annotation)
+	}
+
 	fn synthesise_type_annotation<T: crate::ReadFromFS>(
 		annotation: &Self::TypeAnnotation<'_>,
 		environment: &mut Environment,
@@ -156,13 +163,13 @@ impl crate::ASTImplementation for EznoParser {
 		checking_data: &mut crate::CheckingData<T, Self>,
 	) {
 		match for_loop_initialiser {
-			parser::statements::ForLoopStatementInitializer::VariableDeclaration(declaration) => {
+			parser::statements::ForLoopStatementInitialiser::VariableDeclaration(declaration) => {
 				// TODO is this correct & the best
 				hoist_variable_declaration(declaration, environment, checking_data);
 				synthesise_variable_declaration(declaration, environment, checking_data, false);
 			}
-			parser::statements::ForLoopStatementInitializer::VarStatement(_) => todo!(),
-			parser::statements::ForLoopStatementInitializer::Expression(_) => todo!(),
+			parser::statements::ForLoopStatementInitialiser::VarStatement(_) => todo!(),
+			parser::statements::ForLoopStatementInitialiser::Expression(_) => todo!(),
 		}
 	}
 
@@ -170,23 +177,21 @@ impl crate::ASTImplementation for EznoParser {
 		field: &'a Self::VariableField<'a>,
 		environment: &mut Environment,
 		checking_data: &mut crate::CheckingData<T, Self>,
-		value: TypeId,
+		arguments: VariableRegisterArguments,
 	) {
-		register_variable(
-			field,
-			environment,
-			checking_data,
-			VariableRegisterArguments {
-				// TODO
-				constant: true,
-				space: None,
-				initial_value: Some(value),
-			},
-		);
+		register_variable(field, environment, checking_data, arguments);
 	}
 
 	fn parameter_constrained<'a>(parameter: &'a Self::TypeParameter<'a>) -> bool {
 		parameter.extends.is_some()
+	}
+
+	fn synthesise_block<'a, T: crate::ReadFromFS>(
+		block: &'a Self::Block<'a>,
+		environment: &mut Environment,
+		checking_data: &mut crate::CheckingData<T, Self>,
+	) {
+		synthesise_block(&block.0, environment, checking_data);
 	}
 }
 
@@ -201,7 +206,7 @@ pub(super) fn parser_property_key_to_checker_property_key<
 	perform_side_effect_computed: bool,
 ) -> PropertyKey<'static> {
 	match property_key {
-		ParserPropertyKey::StringLiteral(value, ..) | ParserPropertyKey::Ident(value, ..) => {
+		ParserPropertyKey::StringLiteral(value, ..) | ParserPropertyKey::Identifier(value, ..) => {
 			PropertyKey::String(std::borrow::Cow::Owned(value.clone()))
 		}
 		ParserPropertyKey::NumberLiteral(number, _) => {

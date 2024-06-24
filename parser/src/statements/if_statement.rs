@@ -11,7 +11,7 @@ use super::{ASTNode, ParseResult, Span, TSXToken, Token, TokenReader};
 
 /// A [if...else statement](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/if...else)
 #[apply(derive_ASTNode)]
-#[derive(Debug, Clone, PartialEq, Eq, Visitable, GetFieldByType)]
+#[derive(Debug, Clone, PartialEq, Visitable, GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub struct IfStatement {
 	pub condition: MultipleExpression,
@@ -22,7 +22,7 @@ pub struct IfStatement {
 }
 
 /// `... else if (...) { ... }`
-#[derive(Debug, Clone, PartialEq, Eq, Visitable)]
+#[derive(Debug, Clone, PartialEq, Visitable)]
 #[apply(derive_ASTNode)]
 pub struct ConditionalElseStatement {
 	pub condition: MultipleExpression,
@@ -31,7 +31,7 @@ pub struct ConditionalElseStatement {
 }
 
 /// `... else { ... }`
-#[derive(Debug, Clone, PartialEq, Eq, Visitable)]
+#[derive(Debug, Clone, PartialEq, Visitable)]
 #[apply(derive_ASTNode)]
 pub struct UnconditionalElseStatement {
 	pub inner: BlockOrSingleStatement,
@@ -73,7 +73,13 @@ impl ASTNode for IfStatement {
 				break;
 			}
 		}
-		let position = start.union(inner.get_position());
+		let position = start.union(if let Some(ref t) = trailing_else {
+			t.get_position()
+		} else if let Some(t) = else_conditions.last() {
+			t.get_position()
+		} else {
+			inner.get_position()
+		});
 		Ok(IfStatement { condition, inner, else_conditions, trailing_else, position })
 	}
 

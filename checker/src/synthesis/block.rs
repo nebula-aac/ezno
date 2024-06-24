@@ -27,9 +27,13 @@ pub(super) fn synthesise_block<T: crate::ReadFromFS>(
 			StatementOrDeclaration::Marker(_, _) => {
 				crate::utilities::notify!("should be unreachable");
 			}
+			StatementOrDeclaration::Imported { moved: _moved, .. } => {
+				crate::utilities::notify!("TODO Checking imported?");
+			}
 		}
 
-		if environment.context_type.state.is_it_so_over() {
+		// TODO conditionals and more etc
+		if environment.info.is_halted() {
 			break;
 		}
 	}

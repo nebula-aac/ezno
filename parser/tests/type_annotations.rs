@@ -6,8 +6,13 @@ fn statements() {
 	let input = r#"
 interface X {}
 interface Y extends number, Z2<T> {}
-type Z = 2;
-type Z2<T> = T
+type Z1 = 2;
+type Z2<T> = T;
+type Z3<T = 2> = T;
+type Z4<T = Array<number>> = T;
+type Z5 = this;
+type Z6 = typeof x.something;
+type Z7 = X[Y]
 "#
 	.trim()
 	.to_owned();
@@ -107,6 +112,24 @@ class X {
 fn type_definition_module() {
 	let input = r#"
 export default function (a: string): string
+"#
+	.trim()
+	.replace("    ", "\t");
+
+	let parse_options = ParseOptions { type_definition_module: true, ..Default::default() };
+
+	let module = Module::from_string(input.clone(), parse_options).unwrap();
+	let output = module.to_string(&ToStringOptions::typescript());
+
+	assert_eq!(output, input.clone());
+}
+
+#[test]
+fn mapped_type() {
+	let input = r#"
+type Record<T extends string, V> = { [P in T]: V };
+type Something<T extends string, V> = { [P in T as `get${P}`]: V };
+type Something<T, V extends keyof T> = { [P in keyof T]: V }
 "#
 	.trim()
 	.replace("    ", "\t");

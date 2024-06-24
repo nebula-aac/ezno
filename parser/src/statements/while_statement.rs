@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, PartialEq, Eq, Clone, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, PartialEq, Clone, Visitable, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub struct WhileStatement {
 	pub condition: MultipleExpression,
@@ -50,7 +50,7 @@ impl ASTNode for WhileStatement {
 }
 
 #[apply(derive_ASTNode)]
-#[derive(Debug, PartialEq, Eq, Clone, Visitable, get_field_by_type::GetFieldByType)]
+#[derive(Debug, PartialEq, Clone, Visitable, get_field_by_type::GetFieldByType)]
 #[get_field_by_type_target(Span)]
 pub struct DoWhileStatement {
 	pub condition: MultipleExpression,
@@ -74,8 +74,9 @@ impl ASTNode for DoWhileStatement {
 		let _ = state.expect_keyword(reader, TSXKeyword::While)?;
 		reader.expect_next(TSXToken::OpenParentheses)?;
 		let condition = MultipleExpression::from_reader(reader, state, options)?;
-		reader.expect_next(TSXToken::CloseParentheses)?;
-		Ok(Self { position: start.union(inner.get_position()), condition, inner })
+		let position =
+			start.union(reader.expect_next(TSXToken::CloseParentheses)?.get_end_after(1));
+		Ok(Self { condition, inner, position })
 	}
 
 	fn to_string_from_buffer<T: source_map::ToString>(
